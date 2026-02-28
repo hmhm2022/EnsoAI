@@ -402,7 +402,10 @@ export function RepositorySidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region">
+      <div
+        className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region"
+        data-focus-action="command"
+      >
         {onSwitchWorktreeByPath && (
           <RunningProjectsPopover
             onSelectWorktreeByPath={onSwitchWorktreeByPath}
@@ -501,8 +504,8 @@ export function RepositorySidebar({
               </EmptyDescription>
             </EmptyHeader>
             <Button
-              onClick={(e) => {
-                e.currentTarget.blur();
+              data-focus-action="command"
+              onClick={() => {
                 onAddRepository();
               }}
               variant="outline"
@@ -585,9 +588,9 @@ export function RepositorySidebar({
         <div className="flex items-center gap-2">
           <button
             type="button"
+            data-focus-action="command"
             className="flex h-8 flex-1 items-center justify-start gap-2 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
-            onClick={(e) => {
-              e.currentTarget.blur();
+            onClick={() => {
               onAddRepository();
             }}
           >

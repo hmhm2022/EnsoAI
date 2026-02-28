@@ -4,8 +4,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Dialog, DialogPopup } from '@/components/ui/dialog';
 import { toastManager } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
+import {
+  getFocusActionFromTarget,
+  isAnyOverlayOpen,
+  isBlankAreaTarget,
+  isFocusPolicyLocked,
+  isInputControl,
+  isOverlayTarget,
+} from '@/lib/focusPolicy';
 import { toLocalFileUrl } from '@/lib/localFileUrl';
 import { cn } from '@/lib/utils';
+import { useAgentSessionsStore } from '@/stores/agentSessions';
 
 function getFileName(filePath: string): string {
   const sep = filePath.includes('\\') ? '\\' : '/';
@@ -17,6 +26,12 @@ interface EnhancedInputProps {
   onOpenChange: (open: boolean) => void;
   onSend: (content: string, imagePaths: string[]) => void;
   sessionId?: string;
+  /** 外部显式请求聚焦的序号 */
+  focusRequestKey?: number;
+  /** 记录增强输入重新获得焦点 */
+  onFocusEnter?: () => void;
+  /** 记录增强输入失焦 */
+  onFocusLeave?: () => void;
   /** Current content for the textarea (store-controlled) */
   content: string;
   /** Current image paths (store-controlled) */
@@ -41,7 +56,10 @@ export function EnhancedInput({
   open,
   onOpenChange,
   onSend,
-  sessionId: _sessionId,
+  sessionId,
+  focusRequestKey = 0,
+  onFocusEnter,
+  onFocusLeave,
   content,
   imagePaths,
   onContentChange,
@@ -51,6 +69,9 @@ export function EnhancedInput({
   cwd,
 }: EnhancedInputProps) {
   const { t } = useI18n();
+  const getEnhancedInputFocusState = useAgentSessionsStore(
+    (state) => state.getEnhancedInputFocusState
+  );
   const containerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -195,13 +216,24 @@ export function EnhancedInput({
     if (open && isActive && textareaRef.current) {
       textareaRef.current.focus();
     }
-  }, [open, _sessionId, isActive]);
+  }, [open, sessionId, isActive]);
 
-  // Focus trap: only refocus textarea when focus leaves this panel.
-  // This avoids breaking keyboard navigation to Upload/Close/Send buttons.
+  const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleFocus = useCallback(() => {
+    onFocusEnter?.();
+  }, [onFocusEnter]);
+
+  // 仅在焦点掉到空白区域时回收焦点，避免抢占其他输入控件。
   const handleBlur = useCallback(() => {
-    // Delay check because blur fires before the next focused element is set.
-    requestAnimationFrame(() => {
+    onFocusLeave?.();
+
+    if (blurTimerRef.current) {
+      clearTimeout(blurTimerRef.current);
+    }
+
+    blurTimerRef.current = setTimeout(() => {
+      blurTimerRef.current = null;
       if (!open) return;
 
       const container = containerRef.current;
@@ -213,9 +245,49 @@ export function EnhancedInput({
         return;
       }
 
-      textarea.focus();
-    });
-  }, [open]);
+      if (isOverlayTarget(active) || isAnyOverlayOpen()) {
+        return;
+      }
+
+      if (isInputControl(active)) {
+        return;
+      }
+
+      const action = getFocusActionFromTarget(active);
+      if (action === 'context-switch') {
+        return;
+      }
+
+      const focusState = sessionId ? getEnhancedInputFocusState(sessionId) : 'unlocked';
+      if (!isFocusPolicyLocked(focusState)) {
+        return;
+      }
+
+      if (action === 'command' || isBlankAreaTarget(active)) {
+        textarea.focus();
+      }
+    }, 0);
+  }, [getEnhancedInputFocusState, open, onFocusLeave, sessionId]);
+
+  useEffect(() => {
+    return () => {
+      if (blurTimerRef.current) {
+        clearTimeout(blurTimerRef.current);
+        blurTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // 由外部（Quick Terminal / 新建文件等）显式请求归还焦点。
+  useEffect(() => {
+    if (!open || !isActive || focusRequestKey <= 0) return;
+
+    const timer = setTimeout(() => {
+      textareaRef.current?.focus();
+    }, 0);
+
+    return () => clearTimeout(timer);
+  }, [open, isActive, focusRequestKey]);
 
   // Draft is now preserved in store - no reset on close
 
@@ -519,6 +591,7 @@ export function EnhancedInput({
 
       <div
         ref={containerRef}
+        data-enhanced-input-session={sessionId}
         className="pointer-events-auto bg-background overflow-hidden border-t"
         onKeyDown={handlePanelKeyDown}
       >
@@ -564,6 +637,7 @@ export function EnhancedInput({
                 composingRef.current = false;
               }}
               onPaste={handlePaste}
+              onFocus={handleFocus}
               onBlur={handleBlur}
               placeholder={t('Type your message... (Shift+Enter for newline)')}
               className="w-full min-h-[32px] px-3 resize-none bg-transparent text-sm leading-normal focus:outline-none placeholder:text-muted-foreground/60"

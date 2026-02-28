@@ -188,6 +188,8 @@ export function QuickTerminalModal({
     // biome-ignore lint/a11y/useKeyWithClickEvents: ESC 键已在 useEffect 中处理
     <div
       onClick={handleBackdropClick}
+      data-overlay-open={open ? '' : undefined}
+      data-quick-terminal={open ? '' : undefined}
       className={cn(
         'fixed inset-0 z-50 transition-all',
         // 打开时显示半透明背景

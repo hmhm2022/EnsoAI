@@ -13,6 +13,10 @@ import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { useWorktreeActivityStore } from '@/stores/worktreeActivity';
 
+function getBaseAgentId(agentId: string): string {
+  return agentId.replace(/-(hapi|happy)$/, '');
+}
+
 interface AgentTerminalProps {
   id?: string; // Terminal session ID (UI key)
   cwd?: string;
@@ -142,6 +146,7 @@ export function AgentTerminal({
 
   const terminalSessionId = id ?? sessionId;
   const resumeSessionId = sessionId ?? id;
+  const isClaudeAgent = getBaseAgentId(agentId) === 'claude';
 
   // Use external control if provided, otherwise use local state.
   // IMPORTANT: `externalEnhancedInputOpen` can be false, so we must check `undefined` rather than truthiness.
@@ -178,14 +183,20 @@ export function AgentTerminal({
       // Hide enhanced input when agent starts running (hideWhileRunning mode)
       if (
         newState === 'outputting' &&
-        agentId === 'claude' &&
+        isClaudeAgent &&
         claudeCodeIntegration.enhancedInputEnabled &&
         claudeCodeIntegration.enhancedInputAutoPopup === 'hideWhileRunning'
       ) {
         onEnhancedInputOpenChange?.(false);
       }
     },
-    [terminalSessionId, setOutputState, agentId, claudeCodeIntegration, onEnhancedInputOpenChange]
+    [
+      terminalSessionId,
+      setOutputState,
+      isClaudeAgent,
+      claudeCodeIntegration,
+      onEnhancedInputOpenChange,
+    ]
   );
 
   // Mark session as active when user is viewing it
@@ -558,7 +569,7 @@ export function AgentTerminal({
       if (event.type !== 'keydown') return true;
 
       // Handle Ctrl+G to toggle enhanced input (only for Claude)
-      if (event.ctrlKey && event.code === 'KeyG' && agentId === 'claude') {
+      if (event.ctrlKey && event.code === 'KeyG' && isClaudeAgent) {
         if (claudeCodeIntegration.enhancedInputEnabled) {
           setEnhancedInputOpen(!enhancedInputOpen);
           return false; // Block the key event only when enhanced input is enabled

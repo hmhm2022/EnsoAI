@@ -51,6 +51,7 @@ interface FileTreeProps {
   onFileClick: (path: string) => void;
   onCreateFile: (parentPath: string) => void;
   onCreateDirectory: (parentPath: string) => void;
+  onCreateItemPointerDown?: () => void;
   onRename: (path: string, newName: string) => void;
   onDelete: (path: string) => void;
   onRefresh: () => void;
@@ -74,6 +75,7 @@ export function FileTree({
   onFileClick,
   onCreateFile,
   onCreateDirectory,
+  onCreateItemPointerDown,
   onRename,
   onDelete,
   onRefresh,
@@ -1073,6 +1075,8 @@ export function FileTree({
           <div className="flex gap-2">
             <button
               type="button"
+              data-focus-action="overlay"
+              onPointerDown={onCreateItemPointerDown}
               onClick={() => onCreateFile(rootPath)}
               className="flex items-center gap-1 text-xs hover:text-foreground"
             >
@@ -1081,6 +1085,8 @@ export function FileTree({
             </button>
             <button
               type="button"
+              data-focus-action="overlay"
+              onPointerDown={onCreateItemPointerDown}
               onClick={() => onCreateDirectory(rootPath)}
               className="flex items-center gap-1 text-xs hover:text-foreground"
             >
@@ -1110,7 +1116,10 @@ export function FileTree({
         onContextMenu={handleRootContextMenu}
       >
         {/* Toolbar */}
-        <div className="sticky top-0 z-10 flex h-12 items-center justify-between gap-1 border-b bg-background px-3">
+        <div
+          className="sticky top-0 z-10 flex h-12 items-center justify-between gap-1 border-b bg-background px-3"
+          data-focus-action="command"
+        >
           {onToggleCollapse && (
             <button
               type="button"
@@ -1124,6 +1133,8 @@ export function FileTree({
           <div className="flex items-center gap-1">
             <button
               type="button"
+              data-focus-action="overlay"
+              onPointerDown={onCreateItemPointerDown}
               onClick={() => {
                 const targetPath = getCreateTargetPath();
                 if (targetPath) onCreateFile(targetPath);
@@ -1135,6 +1146,8 @@ export function FileTree({
             </button>
             <button
               type="button"
+              data-focus-action="overlay"
+              onPointerDown={onCreateItemPointerDown}
               onClick={() => {
                 const targetPath = getCreateTargetPath();
                 if (targetPath) onCreateDirectory(targetPath);
@@ -1191,6 +1204,7 @@ export function FileTree({
             }}
             onCreateFile={onCreateFile}
             onCreateDirectory={onCreateDirectory}
+            onCreateItemPointerDown={onCreateItemPointerDown}
             onStartRename={handleStartRename}
             onFinishRename={handleFinishRename}
             onEditValueChange={setEditValue}
@@ -1265,11 +1279,11 @@ export function FileTree({
         >
           {rootPath && (
             <>
-              <MenuItem onClick={() => onCreateFile(rootPath)}>
+              <MenuItem data-focus-action="overlay" onClick={() => onCreateFile(rootPath)}>
                 <FilePlus className="h-4 w-4" />
                 {t('New File')}
               </MenuItem>
-              <MenuItem onClick={() => onCreateDirectory(rootPath)}>
+              <MenuItem data-focus-action="overlay" onClick={() => onCreateDirectory(rootPath)}>
                 <FolderPlus className="h-4 w-4" />
                 {t('New Folder')}
               </MenuItem>
@@ -1355,6 +1369,7 @@ interface FileTreeNodeComponentProps {
   onFileClick: (path: string, isDirectory: boolean) => void;
   onCreateFile: (parentPath: string) => void;
   onCreateDirectory: (parentPath: string) => void;
+  onCreateItemPointerDown?: () => void;
   onStartRename: (path: string, currentName: string) => void;
   onFinishRename: (path: string) => void;
   onEditValueChange: (value: string) => void;
@@ -1422,6 +1437,7 @@ function FileTreeNodeComponent({
   onFileClick,
   onCreateFile,
   onCreateDirectory,
+  onCreateItemPointerDown,
   onStartRename,
   onFinishRename,
   onEditValueChange,
@@ -1737,11 +1753,14 @@ function FileTreeNodeComponent({
         >
           {actualNode.isDirectory && (
             <>
-              <MenuItem onClick={() => onCreateFile(actualNode.path)}>
+              <MenuItem data-focus-action="overlay" onClick={() => onCreateFile(actualNode.path)}>
                 <FilePlus className="h-4 w-4" />
                 {t('New File')}
               </MenuItem>
-              <MenuItem onClick={() => onCreateDirectory(actualNode.path)}>
+              <MenuItem
+                data-focus-action="overlay"
+                onClick={() => onCreateDirectory(actualNode.path)}
+              >
                 <FolderPlus className="h-4 w-4" />
                 {t('New Folder')}
               </MenuItem>
@@ -1844,6 +1863,7 @@ function FileTreeNodeComponent({
                 onFileClick={onFileClick}
                 onCreateFile={onCreateFile}
                 onCreateDirectory={onCreateDirectory}
+                onCreateItemPointerDown={onCreateItemPointerDown}
                 onStartRename={onStartRename}
                 onFinishRename={onFinishRename}
                 onEditValueChange={onEditValueChange}

@@ -77,6 +77,7 @@ import { GlowBorder, type GlowState, useGlowEffectEnabled } from '@/components/u
 import { RepoItemWithGlow } from '@/components/ui/glow-wrappers';
 import { toastManager } from '@/components/ui/toast';
 import { CreateWorktreeDialog } from '@/components/worktree/CreateWorktreeDialog';
+import { useFocusReturn } from '@/hooks/useFocusReturn';
 import { useGitSync } from '@/hooks/useGitSync';
 import { useWorktreeOutputState } from '@/hooks/useOutputState';
 import { useShouldPoll } from '@/hooks/useWindowFocus';
@@ -85,6 +86,7 @@ import { useI18n } from '@/i18n';
 import { heightVariants, springFast, springStandard } from '@/lib/motion';
 import { cn } from '@/lib/utils';
 import { useSettingsStore } from '@/stores/settings';
+import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { useWorktreeActivityStore } from '@/stores/worktreeActivity';
 import { RunningProjectsPopover } from './RunningProjectsPopover';
 
@@ -241,6 +243,11 @@ export function TreeSidebar({
 
   // Repository manager dialog
   const [repoManagerOpen, setRepoManagerOpen] = useState(false);
+  const activeSessionId = useTerminalWriteStore((state) => state.activeSessionId);
+  const {
+    captureFromPointer: captureRepoManagerFocusFromPointer,
+    restore: restoreRepoManagerFocus,
+  } = useFocusReturn(activeSessionId);
 
   // Cached repository settings to avoid repeated localStorage reads
   const [repoSettingsMap, setRepoSettingsMap] = useState<Record<string, RepositorySettings>>(
@@ -553,6 +560,16 @@ export function TreeSidebar({
     }
     setRepoToRemove(null);
   };
+
+  const handleRepoManagerOpenChange = useCallback(
+    (open: boolean) => {
+      setRepoManagerOpen(open);
+      if (!open) {
+        restoreRepoManagerFocus();
+      }
+    },
+    [restoreRepoManagerFocus]
+  );
 
   const showSections = activeGroupId === ALL_GROUP_ID && !searchQuery && !hideGroups;
 
@@ -883,12 +900,17 @@ export function TreeSidebar({
       )}
     >
       {/* Header */}
-      <div className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region">
+      <div
+        className="flex h-12 items-center justify-end gap-1 border-b px-3 drag-region"
+        data-focus-action="command"
+      >
         <div className="flex items-center gap-1">
           {/* Manage repositories button */}
           <button
             type="button"
+            data-focus-action="overlay"
             className="flex h-8 w-8 items-center justify-center rounded-md no-drag text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+            onPointerDown={captureRepoManagerFocusFromPointer}
             onClick={() => setRepoManagerOpen(true)}
             title={t('Manage Repositories')}
           >
@@ -1053,8 +1075,8 @@ export function TreeSidebar({
               </EmptyDescription>
             </EmptyHeader>
             <Button
-              onClick={(e) => {
-                e.currentTarget.blur();
+              data-focus-action="command"
+              onClick={() => {
                 onAddRepository();
               }}
               variant="outline"
@@ -1147,9 +1169,9 @@ export function TreeSidebar({
         <div className="flex items-center gap-2">
           <button
             type="button"
+            data-focus-action="command"
             className="flex h-8 flex-1 items-center justify-start gap-2 rounded-md px-3 text-sm text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
-            onClick={(e) => {
-              e.currentTarget.blur();
+            onClick={() => {
               onAddRepository();
             }}
           >
@@ -1420,7 +1442,7 @@ export function TreeSidebar({
       {/* Repository Manager Dialog */}
       <RepositoryManagerDialog
         open={repoManagerOpen}
-        onOpenChange={setRepoManagerOpen}
+        onOpenChange={handleRepoManagerOpenChange}
         repositories={repositories}
         selectedRepo={selectedRepo}
         onSelectRepo={onSelectRepo}

@@ -27,6 +27,7 @@ interface AgentGroupProps {
   // Quick Terminal props
   quickTerminalOpen?: boolean;
   quickTerminalHasProcess?: boolean;
+  onQuickTerminalPointerDown?: () => void;
   onToggleQuickTerminal?: () => void;
 }
 
@@ -46,6 +47,7 @@ export function AgentGroup({
   onGroupClick,
   quickTerminalOpen,
   quickTerminalHasProcess,
+  onQuickTerminalPointerDown,
   onToggleQuickTerminal,
 }: AgentGroupProps) {
   const { t } = useI18n();
@@ -166,6 +168,7 @@ export function AgentGroup({
       onReorderSessions={onSessionReorder}
       quickTerminalOpen={quickTerminalOpen}
       quickTerminalHasProcess={quickTerminalHasProcess}
+      onQuickTerminalPointerDown={onQuickTerminalPointerDown}
       onToggleQuickTerminal={onToggleQuickTerminal}
     />
   );

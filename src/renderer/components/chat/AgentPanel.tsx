@@ -13,9 +13,18 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty';
 import { Tooltip, TooltipPopup, TooltipTrigger } from '@/components/ui/tooltip';
+import { useFocusReturn } from '@/hooks/useFocusReturn';
 import { useI18n } from '@/i18n';
+import { getEnhancedInputElement, isTargetInsideEnhancedInputSession } from '@/lib/focus';
+import {
+  cycleTabWithinContainer,
+  getFocusActionFromTarget,
+  isFocusPolicyLocked,
+  isOverlayTarget,
+} from '@/lib/focusPolicy';
 import { defaultDarkTheme, getXtermTheme } from '@/lib/ghosttyTheme';
 import { matchesKeybinding } from '@/lib/keybinding';
+import { classifyShortcutScope } from '@/lib/shortcutPolicy';
 import { cn } from '@/lib/utils';
 import { useAgentSessionsStore } from '@/stores/agentSessions';
 import { initAgentStatusListener } from '@/stores/agentStatus';
@@ -50,13 +59,16 @@ const AGENT_INFO: Record<string, { name: string; command: string }> = {
   opencode: { name: 'OpenCode', command: 'opencode' },
 };
 
+function getBaseAgentId(agentId: string): string {
+  return agentId.replace(/-(hapi|happy)$/, '');
+}
+
 /**
  * Whether the session uses Cursor CLI. Session name from terminal title / first line
  * is only applied for Cursor to avoid affecting other agents (Claude Code, etc.).
  */
 function isCursorAgent(agentId: string): boolean {
-  const baseId = agentId.replace(/-(hapi|happy)$/, '');
-  return baseId === 'cursor';
+  return getBaseAgentId(agentId) === 'cursor';
 }
 
 /**
@@ -252,10 +264,6 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
 
   const [hasRunningProcess, setHasRunningProcess] = useState(false);
 
-  const handleToggleQuickTerminal = useCallback(() => {
-    setQuickTerminalOpen(!quickTerminalOpen);
-  }, [quickTerminalOpen, setQuickTerminalOpen]);
-
   const handleQuickTerminalSessionInit = useCallback(
     (sessionId: string) => {
       // 总是更新 session，覆盖可能存在的旧记录（对应已销毁的 PTY）
@@ -263,16 +271,6 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
     },
     [cwd, setQuickTerminalSession]
   );
-
-  const handleCloseQuickTerminal = useCallback(() => {
-    // 关闭 modal
-    setQuickTerminalOpen(false);
-
-    // 清除 session 记录（PTY 由 ShellTerminal 组件卸载时的 cleanup 销毁，这里不要重复调用 destroy）
-    if (currentQuickTerminalSession) {
-      removeQuickTerminalSession(cwd);
-    }
-  }, [currentQuickTerminalSession, cwd, setQuickTerminalOpen, removeQuickTerminalSession]);
 
   // 监听终端会话状态
   useEffect(() => {
@@ -306,6 +304,12 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
   // Enhanced input state actions from store
   const setEnhancedInputOpen = useAgentSessionsStore((state) => state.setEnhancedInputOpen);
   const getEnhancedInputState = useAgentSessionsStore((state) => state.getEnhancedInputState);
+  const getEnhancedInputFocusState = useAgentSessionsStore(
+    (state) => state.getEnhancedInputFocusState
+  );
+  const transitionEnhancedInputFocusState = useAgentSessionsStore(
+    (state) => state.transitionEnhancedInputFocusState
+  );
 
   // Group states from store (persists across component remounts)
   const worktreeGroupStates = useAgentSessionsStore((state) => state.groupStates);
@@ -321,6 +325,62 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
   }, [cwd, worktreeGroupStates]);
 
   const { groups, activeGroupId } = currentGroupState;
+  const activeAgentSessionId = useMemo(
+    () => groups.find((group) => group.id === activeGroupId)?.activeSessionId ?? null,
+    [groups, activeGroupId]
+  );
+  const {
+    captureFromPointer: captureQuickTerminalFocusFromPointer,
+    captureFallback: captureQuickTerminalFocusFallback,
+    restore: restoreQuickTerminalFocus,
+  } = useFocusReturn(activeAgentSessionId);
+
+  const handleToggleQuickTerminal = useCallback(() => {
+    if (!quickTerminalOpen) {
+      captureQuickTerminalFocusFallback();
+      setQuickTerminalOpen(true);
+      return;
+    }
+
+    setQuickTerminalOpen(false);
+    restoreQuickTerminalFocus();
+  }, [
+    captureQuickTerminalFocusFallback,
+    quickTerminalOpen,
+    restoreQuickTerminalFocus,
+    setQuickTerminalOpen,
+  ]);
+
+  const handleQuickTerminalPointerDown = useCallback(() => {
+    captureQuickTerminalFocusFromPointer();
+  }, [captureQuickTerminalFocusFromPointer]);
+
+  const handleQuickTerminalOpenChange = useCallback(
+    (open: boolean) => {
+      setQuickTerminalOpen(open);
+      if (!open) {
+        restoreQuickTerminalFocus();
+      }
+    },
+    [restoreQuickTerminalFocus, setQuickTerminalOpen]
+  );
+
+  const handleCloseQuickTerminal = useCallback(() => {
+    // 关闭 modal
+    setQuickTerminalOpen(false);
+
+    // 清除 session 记录（PTY 由 ShellTerminal 组件卸载时的 cleanup 销毁，这里不要重复调用 destroy）
+    if (currentQuickTerminalSession) {
+      removeQuickTerminalSession(cwd);
+    }
+    restoreQuickTerminalFocus();
+  }, [
+    currentQuickTerminalSession,
+    cwd,
+    removeQuickTerminalSession,
+    restoreQuickTerminalFocus,
+    setQuickTerminalOpen,
+  ]);
 
   // Update group state helper - uses store instead of local state
   const updateCurrentGroupState = useCallback(
@@ -715,50 +775,49 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
   const setOutputState = useAgentSessionsStore((s) => s.setOutputState);
   const getActivityState = useWorktreeActivityStore((s) => s.getActivityState);
   useEffect(() => {
-    const unsubscribe = window.electronAPI.notification.onAgentStop(({ sessionId }) => {
-      const session = findSessionByNotificationId(sessionId);
-      if (session) {
-        // Check if user is currently viewing this session
-        const activeGroup = groups.find((g) => g.id === activeGroupId);
-        const isViewingSession =
-          activeGroup?.activeSessionId === session.id && pathsEqual(session.cwd, cwd) && isActive;
+    const unsubscribe = window.electronAPI.notification.onAgentStop(
+      ({ sessionId: notificationSessionId }) => {
+        const session = findSessionByNotificationId(notificationSessionId);
+        if (session) {
+          // Check if user is currently viewing this session
+          const activeGroup = groups.find((g) => g.id === activeGroupId);
+          const isViewingSession =
+            activeGroup?.activeSessionId === session.id && pathsEqual(session.cwd, cwd) && isActive;
 
-        // Update output state to idle (will become 'unread' if user is not viewing)
-        setOutputState(session.id, 'idle', isViewingSession);
+          // Update output state to idle (will become 'unread' if user is not viewing)
+          setOutputState(session.id, 'idle', isViewingSession);
 
-        // Check if enhanced input is enabled and should auto popup
-        // Auto popup requires:
-        // 1. enhancedInputEnabled
-        // 2. enhancedInputAutoPopup is 'always' or 'hideWhileRunning'
-        // 3. stopHookEnabled (for Claude Code)
-        // 4. NOT in 'waiting_input' state (AskUserQuestion or Permission Prompt active)
-        const autoPopupMode = claudeCodeIntegration.enhancedInputAutoPopup;
-        const activityState = getActivityState(session.cwd);
-        const shouldAutoPopup =
-          session.agentId === 'claude' &&
-          claudeCodeIntegration.enhancedInputEnabled &&
-          (autoPopupMode === 'always' || autoPopupMode === 'hideWhileRunning') &&
-          claudeCodeIntegration.stopHookEnabled &&
-          activityState !== 'waiting_input';
+          // Check if enhanced input is enabled and should auto popup.
+          // Use a microtask to avoid race with other onAgentStop listeners that
+          // may update activity state (e.g. waiting_input -> completed) in the same tick.
+          const autoPopupMode = claudeCodeIntegration.enhancedInputAutoPopup;
+          const shouldAutoPopupBase =
+            getBaseAgentId(session.agentId) === 'claude' &&
+            claudeCodeIntegration.enhancedInputEnabled &&
+            (autoPopupMode === 'always' || autoPopupMode === 'hideWhileRunning') &&
+            claudeCodeIntegration.stopHookEnabled;
 
-        // Auto popup enhanced input if enabled
-        // Now we set the open state in store - it persists per session
-        if (shouldAutoPopup) {
-          setEnhancedInputOpen(sessionId, true);
+          if (shouldAutoPopupBase) {
+            queueMicrotask(() => {
+              if (getActivityState(session.cwd) !== 'waiting_input') {
+                setEnhancedInputOpen(session.id, true);
+              }
+            });
+          }
+
+          // Send system notification
+          const projectName = session.cwd.split('/').pop() || 'Unknown';
+          const agentName = AGENT_INFO[session.agentId]?.name || session.agentCommand;
+          // Use terminal title as body, fall back to project name
+          const notificationBody = session.terminalTitle || projectName;
+          window.electronAPI.notification.show({
+            title: t('{{command}} completed', { command: agentName }),
+            body: notificationBody,
+            sessionId: session.id,
+          });
         }
-
-        // Send system notification
-        const projectName = session.cwd.split('/').pop() || 'Unknown';
-        const agentName = AGENT_INFO[session.agentId]?.name || session.agentCommand;
-        // Use terminal title as body, fall back to project name
-        const notificationBody = session.terminalTitle || projectName;
-        window.electronAPI.notification.show({
-          title: t('{{command}} completed', { command: agentName }),
-          body: notificationBody,
-          sessionId: session.id,
-        });
       }
-    });
+    );
     return unsubscribe;
   }, [
     findSessionByNotificationId,
@@ -1323,6 +1382,70 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [isActive, handleToggleQuickTerminal]);
 
+  useEffect(() => {
+    if (!isActive || !activeAgentSessionId) return;
+
+    const handleKeyDownCapture = (e: KeyboardEvent) => {
+      const focusState = getEnhancedInputFocusState(activeAgentSessionId);
+      if (!isFocusPolicyLocked(focusState)) return;
+
+      if (isOverlayTarget(e.target)) {
+        return;
+      }
+
+      if (isTargetInsideEnhancedInputSession(e.target, activeAgentSessionId)) {
+        if (e.key !== 'Tab') {
+          return;
+        }
+
+        const enhancedInputElement = getEnhancedInputElement(activeAgentSessionId);
+        if (!enhancedInputElement) return;
+
+        e.preventDefault();
+        e.stopPropagation();
+        cycleTabWithinContainer(enhancedInputElement, e.shiftKey);
+        return;
+      }
+
+      const shortcutScope = classifyShortcutScope(e);
+      if (shortcutScope === 'system' || shortcutScope === 'app' || shortcutScope === 'overlay') {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+    };
+
+    window.addEventListener('keydown', handleKeyDownCapture, true);
+    return () => window.removeEventListener('keydown', handleKeyDownCapture, true);
+  }, [activeAgentSessionId, getEnhancedInputFocusState, isActive]);
+
+  useEffect(() => {
+    if (!isActive || !activeAgentSessionId) return;
+
+    const handlePointerDownCapture = (e: PointerEvent) => {
+      const focusState = getEnhancedInputFocusState(activeAgentSessionId);
+      if (focusState !== 'locked') return;
+
+      if (isOverlayTarget(e.target)) {
+        return;
+      }
+
+      const action = getFocusActionFromTarget(e.target);
+      if (action === 'context-switch') {
+        transitionEnhancedInputFocusState(activeAgentSessionId, 'context-switch');
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDownCapture, true);
+    return () => window.removeEventListener('pointerdown', handlePointerDownCapture, true);
+  }, [
+    activeAgentSessionId,
+    getEnhancedInputFocusState,
+    isActive,
+    transitionEnhancedInputFocusState,
+  ]);
+
   const maxStatusLineHeight = useMemo(() => {
     let max = 0;
     for (const h of Object.values(statusLineHeightsByGroupId)) {
@@ -1586,7 +1709,12 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
                 onSplit={() => groupId && handleSplit(groupId)}
                 canMerge={info ? info.groupIndex > 0 : false}
                 onMerge={() => groupId && handleMerge(groupId)}
-                onFocus={() => groupId && handleSelectSession(sessionId, groupId)}
+                onFocus={() => {
+                  if (groupId) {
+                    handleSelectSession(sessionId, groupId);
+                  }
+                  transitionEnhancedInputFocusState(sessionId, 'context-switch');
+                }}
                 enhancedInputOpen={getEnhancedInputState(sessionId).open}
                 onEnhancedInputOpenChange={(open) => {
                   // EnhancedInput open state is now stored per-session in the store
@@ -1643,6 +1771,9 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
               onGroupClick={() => handleGroupClick(group.id)}
               quickTerminalOpen={quickTerminalOpen}
               quickTerminalHasProcess={hasRunningProcess}
+              onQuickTerminalPointerDown={
+                quickTerminalEnabled ? handleQuickTerminalPointerDown : undefined
+              }
               onToggleQuickTerminal={quickTerminalEnabled ? handleToggleQuickTerminal : undefined}
             />
             {/* Bottom bar: Enhanced Input + Status Line, height measured for terminal offset */}
@@ -1668,7 +1799,7 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
         <QuickTerminalModal
           key={`quick-terminal-${quickTerminalMountKey}`}
           open={quickTerminalOpen && isActive}
-          onOpenChange={setQuickTerminalOpen}
+          onOpenChange={handleQuickTerminalOpenChange}
           onClose={handleCloseQuickTerminal}
           cwd={cwd}
           onSessionInit={handleQuickTerminalSessionInit}

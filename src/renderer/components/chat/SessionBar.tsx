@@ -58,6 +58,7 @@ interface SessionBarProps {
   // Quick Terminal props
   quickTerminalOpen?: boolean;
   quickTerminalHasProcess?: boolean;
+  onQuickTerminalPointerDown?: () => void;
   onToggleQuickTerminal?: () => void;
 }
 
@@ -412,6 +413,7 @@ export function SessionBar({
   onReorderSessions,
   quickTerminalOpen,
   quickTerminalHasProcess,
+  onQuickTerminalPointerDown,
   onToggleQuickTerminal,
 }: SessionBarProps) {
   const { t } = useI18n();
@@ -1021,6 +1023,7 @@ export function SessionBar({
                   <TooltipTrigger render={<span />}>
                     <button
                       type="button"
+                      onPointerDown={onQuickTerminalPointerDown}
                       onClick={onToggleQuickTerminal}
                       className={cn(
                         'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border transition-colors',

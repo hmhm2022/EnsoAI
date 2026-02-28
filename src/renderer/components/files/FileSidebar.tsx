@@ -14,6 +14,7 @@ import {
 import { addToast, toastManager } from '@/components/ui/toast';
 import { useEditor } from '@/hooks/useEditor';
 import { useFileTree } from '@/hooks/useFileTree';
+import { useFocusReturn } from '@/hooks/useFocusReturn';
 import { useI18n } from '@/i18n';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { getEditorSelectionText } from './EditorArea';
@@ -79,6 +80,13 @@ export function FileSidebar({
     targetDir: string;
     operation: 'copy' | 'move';
   } | null>(null);
+  const activeSessionId = useTerminalWriteStore((state) => state.activeSessionId);
+  const effectiveSessionId = sessionId ?? activeSessionId;
+  const {
+    captureFromPointer: captureNewItemFocusFromPointer,
+    captureFallback: captureNewItemFocusFallback,
+    restore: restoreNewItemFocus,
+  } = useFocusReturn(effectiveSessionId);
 
   // Auto-sync file tree selection with active tab
   useEffect(() => {
@@ -113,15 +121,27 @@ export function FileSidebar({
     [tabs, setActiveFile, loadFile, onSwitchTab]
   );
 
-  const handleCreateFile = useCallback((parentPath: string) => {
-    setNewItemType('file');
-    setNewItemParentPath(parentPath);
-  }, []);
+  const handleCreateFile = useCallback(
+    (parentPath: string) => {
+      captureNewItemFocusFallback();
+      setNewItemType('file');
+      setNewItemParentPath(parentPath);
+    },
+    [captureNewItemFocusFallback]
+  );
 
-  const handleCreateDirectory = useCallback((parentPath: string) => {
-    setNewItemType('directory');
-    setNewItemParentPath(parentPath);
-  }, []);
+  const handleCreateDirectory = useCallback(
+    (parentPath: string) => {
+      captureNewItemFocusFallback();
+      setNewItemType('directory');
+      setNewItemParentPath(parentPath);
+    },
+    [captureNewItemFocusFallback]
+  );
+
+  const handleCreateItemPointerDown = useCallback(() => {
+    captureNewItemFocusFromPointer();
+  }, [captureNewItemFocusFromPointer]);
 
   const handleNewItemConfirm = useCallback(
     async (name: string) => {
@@ -134,9 +154,16 @@ export function FileSidebar({
       }
       setNewItemType(null);
       setNewItemParentPath('');
+      restoreNewItemFocus();
     },
-    [newItemType, newItemParentPath, createFile, createDirectory, loadFile]
+    [newItemType, newItemParentPath, createFile, createDirectory, loadFile, restoreNewItemFocus]
   );
+
+  const handleNewItemCancel = useCallback(() => {
+    setNewItemType(null);
+    setNewItemParentPath('');
+    restoreNewItemFocus();
+  }, [restoreNewItemFocus]);
 
   const handleRename = useCallback(
     async (path: string, newName: string) => {
@@ -160,8 +187,6 @@ export function FileSidebar({
 
   const terminalWrite = useTerminalWriteStore((state) => state.write);
   const terminalFocus = useTerminalWriteStore((state) => state.focus);
-  const activeSessionId = useTerminalWriteStore((state) => state.activeSessionId);
-  const effectiveSessionId = sessionId ?? activeSessionId;
 
   const handleSendToSession = useCallback(
     (path: string) => {
@@ -372,6 +397,7 @@ export function FileSidebar({
             onSelectedPathChange={setSelectedFilePath}
             onCreateFile={handleCreateFile}
             onCreateDirectory={handleCreateDirectory}
+            onCreateItemPointerDown={handleCreateItemPointerDown}
             onRename={handleRename}
             onDelete={handleDelete}
             onRefresh={refresh}
@@ -400,10 +426,7 @@ export function FileSidebar({
             isOpen={newItemType !== null}
             type={newItemType || 'file'}
             onConfirm={handleNewItemConfirm}
-            onCancel={() => {
-              setNewItemType(null);
-              setNewItemParentPath('');
-            }}
+            onCancel={handleNewItemCancel}
           />
           <FileConflictDialog
             open={conflictDialogOpen}

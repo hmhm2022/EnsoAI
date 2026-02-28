@@ -206,6 +206,7 @@ export function WorktreePanel({
           'flex h-12 items-center justify-end gap-1 border-b px-3 drag-region',
           repositoryCollapsed && 'pl-[70px]'
         )}
+        data-focus-action="command"
       >
         {/* Expand repository button when collapsed */}
         {repositoryCollapsed && onExpandRepository && (

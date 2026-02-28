@@ -21,8 +21,8 @@ import { RunningProjectsPopover } from '@/components/layout/RunningProjectsPopov
 import { SettingsContent } from '@/components/settings';
 import type { SettingsCategory } from '@/components/settings/constants';
 import { SourceControlPanel } from '@/components/source-control';
-import { TodoPanel } from '@/components/todo';
 import { DiffReviewModal } from '@/components/source-control/DiffReviewModal';
+import { TodoPanel } from '@/components/todo';
 import { Button } from '@/components/ui/button';
 import {
   Empty,
@@ -267,6 +267,7 @@ export function MainContent({
                 exit={{ width: 0, opacity: 0 }}
                 transition={{ type: 'spring', stiffness: 400, damping: 30 }}
                 className="flex items-center overflow-hidden"
+                data-focus-action="command"
               >
                 {needsTrafficLightPadding && <div className="mx-1 h-4 w-px bg-border" />}
                 {repositoryCollapsed && onSwitchWorktree && onSwitchTab && (

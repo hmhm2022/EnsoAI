@@ -4,6 +4,11 @@ import { normalizePath, pathsEqual } from '@/App/storage';
 import type { Session } from '@/components/chat/SessionBar';
 import type { AgentGroupState } from '@/components/chat/types';
 import { createInitialGroupState } from '@/components/chat/types';
+import {
+  type FocusPolicyEvent,
+  type FocusPolicyState,
+  transitionFocusPolicyState,
+} from '@/lib/focusPolicy';
 
 // Global storage key for all sessions across all repos
 export const SESSIONS_STORAGE_KEY = 'enso-agent-sessions';
@@ -52,6 +57,9 @@ interface AgentSessionsState {
   groupStates: WorktreeGroupStates; // Group states per worktree (not persisted)
   runtimeStates: Record<string, SessionRuntimeState>; // Runtime output states (not persisted)
   enhancedInputStates: Record<string, EnhancedInputState>; // Enhanced input states per session (not persisted)
+  enhancedInputFocusKeys: Record<string, number>; // 增强输入聚焦请求序号（不持久化）
+  enhancedInputBlurToken: { sessionId: string | null; consumed: boolean }; // 可消费的增强输入失焦令牌
+  enhancedInputFocusStates: Record<string, FocusPolicyState>; // 增强输入焦点状态（不持久化）
 
   // Actions
   addSession: (session: Session) => void;
@@ -82,6 +90,12 @@ interface AgentSessionsState {
   setEnhancedInputContent: (sessionId: string, content: string) => void;
   setEnhancedInputImages: (sessionId: string, imagePaths: string[]) => void;
   clearEnhancedInput: (sessionId: string, keepOpen?: boolean) => void; // Clear content after sending
+  requestEnhancedInputFocus: (sessionId: string) => void;
+  markEnhancedInputBlurred: (sessionId: string) => void;
+  consumeEnhancedInputBlurToken: (sessionId: string) => boolean;
+  clearEnhancedInputBlurToken: (sessionId?: string) => void;
+  getEnhancedInputFocusState: (sessionId: string) => FocusPolicyState;
+  transitionEnhancedInputFocusState: (sessionId: string, event: FocusPolicyEvent) => void;
 
   // Aggregated state selectors
   getAggregatedByWorktree: (cwd: string) => AggregatedOutputState;
@@ -174,6 +188,9 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
     groupStates: {}, // Not persisted - will be recreated from sessions on mount
     runtimeStates: {}, // Not persisted - runtime output states
     enhancedInputStates: {}, // Not persisted - enhanced input states per session
+    enhancedInputFocusKeys: {}, // Not persisted - focus request counters per session
+    enhancedInputBlurToken: { sessionId: null, consumed: false },
+    enhancedInputFocusStates: {},
 
     addSession: (session) =>
       set((state) => {
@@ -196,6 +213,14 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
             ...state.enhancedInputStates,
             [session.id]: { open: false, content: '', imagePaths: [] },
           },
+          enhancedInputFocusKeys: {
+            ...state.enhancedInputFocusKeys,
+            [session.id]: 0,
+          },
+          enhancedInputFocusStates: {
+            ...state.enhancedInputFocusStates,
+            [session.id]: 'unlocked',
+          },
         };
       }),
 
@@ -211,10 +236,21 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
         // Clean up enhanced input states
         const newEnhancedInputStates = { ...state.enhancedInputStates };
         delete newEnhancedInputStates[id];
+        const newEnhancedInputFocusKeys = { ...state.enhancedInputFocusKeys };
+        delete newEnhancedInputFocusKeys[id];
+        const newEnhancedInputFocusStates = { ...state.enhancedInputFocusStates };
+        delete newEnhancedInputFocusStates[id];
+        const enhancedInputBlurToken =
+          state.enhancedInputBlurToken.sessionId === id
+            ? { sessionId: null, consumed: false }
+            : state.enhancedInputBlurToken;
         return {
           sessions: newSessions,
           runtimeStates: newRuntimeStates,
           enhancedInputStates: newEnhancedInputStates,
+          enhancedInputFocusKeys: newEnhancedInputFocusKeys,
+          enhancedInputBlurToken,
+          enhancedInputFocusStates: newEnhancedInputFocusStates,
         };
       }),
 
@@ -505,6 +541,58 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
           enhancedInputStates: {
             ...prev.enhancedInputStates,
             [sessionId]: { open: keepOpen, content: '', imagePaths: [] },
+          },
+        };
+      }),
+
+    requestEnhancedInputFocus: (sessionId) =>
+      set((prev) => ({
+        enhancedInputFocusKeys: {
+          ...prev.enhancedInputFocusKeys,
+          [sessionId]: (prev.enhancedInputFocusKeys[sessionId] ?? 0) + 1,
+        },
+      })),
+
+    markEnhancedInputBlurred: (sessionId) =>
+      set({
+        enhancedInputBlurToken: { sessionId, consumed: false },
+      }),
+
+    consumeEnhancedInputBlurToken: (sessionId) => {
+      const token = get().enhancedInputBlurToken;
+      if (token.sessionId !== sessionId || token.consumed) {
+        return false;
+      }
+      set({
+        enhancedInputBlurToken: { sessionId, consumed: true },
+      });
+      return true;
+    },
+
+    clearEnhancedInputBlurToken: (sessionId) =>
+      set((state) => {
+        if (sessionId && state.enhancedInputBlurToken.sessionId !== sessionId) {
+          return state;
+        }
+        return {
+          enhancedInputBlurToken: { sessionId: null, consumed: false },
+        };
+      }),
+
+    getEnhancedInputFocusState: (sessionId) =>
+      get().enhancedInputFocusStates[sessionId] ?? 'unlocked',
+
+    transitionEnhancedInputFocusState: (sessionId, event) =>
+      set((state) => {
+        const current = state.enhancedInputFocusStates[sessionId] ?? 'unlocked';
+        const next = transitionFocusPolicyState(current, event);
+        if (next === current) {
+          return state;
+        }
+        return {
+          enhancedInputFocusStates: {
+            ...state.enhancedInputFocusStates,
+            [sessionId]: next,
           },
         };
       }),

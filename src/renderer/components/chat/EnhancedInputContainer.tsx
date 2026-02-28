@@ -25,6 +25,16 @@ export const EnhancedInputContainer = memo(function EnhancedInputContainer({
   const setEnhancedInputContent = useAgentSessionsStore((state) => state.setEnhancedInputContent);
   const setEnhancedInputImages = useAgentSessionsStore((state) => state.setEnhancedInputImages);
   const clearEnhancedInput = useAgentSessionsStore((state) => state.clearEnhancedInput);
+  const focusRequestKey = useAgentSessionsStore(
+    (state) => state.enhancedInputFocusKeys[sessionId] ?? 0
+  );
+  const markEnhancedInputBlurred = useAgentSessionsStore((state) => state.markEnhancedInputBlurred);
+  const clearEnhancedInputBlurToken = useAgentSessionsStore(
+    (state) => state.clearEnhancedInputBlurToken
+  );
+  const transitionEnhancedInputFocusState = useAgentSessionsStore(
+    (state) => state.transitionEnhancedInputFocusState
+  );
 
   // Get enhanced input mode setting
   const enhancedInputAutoPopup = useSettingsStore(
@@ -48,6 +58,7 @@ export const EnhancedInputContainer = memo(function EnhancedInputContainer({
       onOpenChange={(newOpen) => {
         if (!newOpen) {
           setEnhancedInputOpen(sessionId, false);
+          transitionEnhancedInputFocusState(sessionId, 'enhanced-close');
         }
       }}
       onSend={(sendContent, sendImagePaths) => {
@@ -56,6 +67,12 @@ export const EnhancedInputContainer = memo(function EnhancedInputContainer({
         clearEnhancedInput(sessionId, keepOpenAfterSend);
       }}
       sessionId={sessionId}
+      focusRequestKey={focusRequestKey}
+      onFocusEnter={() => {
+        clearEnhancedInputBlurToken(sessionId);
+        transitionEnhancedInputFocusState(sessionId, 'enhanced-focus');
+      }}
+      onFocusLeave={() => markEnhancedInputBlurred(sessionId)}
       content={content}
       imagePaths={imagePaths}
       onContentChange={(newContent) => setEnhancedInputContent(sessionId, newContent)}

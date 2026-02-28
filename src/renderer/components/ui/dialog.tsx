@@ -95,6 +95,7 @@ function DialogPopup({
             className
           )}
           style={mergedStyle}
+          data-overlay-open=""
           data-slot="dialog-popup"
           {...props}
         >

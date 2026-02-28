@@ -11,7 +11,11 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty';
 import { addToast, toastManager } from '@/components/ui/toast';
+import { useFocusReturn } from '@/hooks/useFocusReturn';
 import { useI18n } from '@/i18n';
+import { isFocusPolicyLocked } from '@/lib/focusPolicy';
+import { classifyShortcutScope } from '@/lib/shortcutPolicy';
+import { useAgentSessionsStore } from '@/stores/agentSessions';
 import { requestUnsavedChoice } from '@/stores/unsavedPrompt';
 
 // Global ref for passing selected text to search dialog
@@ -160,6 +164,16 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
   // Send file path to current session
   const terminalWrite = useTerminalWriteStore((state) => state.write);
   const terminalFocus = useTerminalWriteStore((state) => state.focus);
+  const activeSessionId = useTerminalWriteStore((state) => state.activeSessionId);
+  const getEnhancedInputFocusState = useAgentSessionsStore(
+    (state) => state.getEnhancedInputFocusState
+  );
+  const effectiveSessionId = sessionId ?? activeSessionId;
+  const {
+    captureFromPointer: captureNewItemFocusFromPointer,
+    captureFallback: captureNewItemFocusFallback,
+    restore: restoreNewItemFocus,
+  } = useFocusReturn(effectiveSessionId);
   const handleSendToSession = useCallback(
     (path: string) => {
       if (!sessionId) return;
@@ -236,6 +250,18 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
     const handleKeyDown = (e: KeyboardEvent) => {
       if (!isActive) return;
 
+      if (
+        effectiveSessionId &&
+        isFocusPolicyLocked(getEnhancedInputFocusState(effectiveSessionId))
+      ) {
+        const shortcutScope = classifyShortcutScope(e);
+        if (shortcutScope === 'panel') {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+      }
+
       // File search (default: Cmd+P)
       if (matchesKeybinding(e, searchKeybindings.searchFiles)) {
         e.preventDefault();
@@ -269,7 +295,16 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
     };
     window.addEventListener('keydown', handleKeyDown, true);
     return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [isActive, tabs, activeTab, setActiveFile, searchKeybindings, openSearch]);
+  }, [
+    effectiveSessionId,
+    getEnhancedInputFocusState,
+    isActive,
+    tabs,
+    activeTab,
+    setActiveFile,
+    searchKeybindings,
+    openSearch,
+  ]);
 
   const shouldPromptUnsaved = useCallback(
     (path: string) => {
@@ -380,16 +415,28 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
   );
 
   // Handle create file
-  const handleCreateFile = useCallback((parentPath: string) => {
-    setNewItemType('file');
-    setNewItemParentPath(parentPath);
-  }, []);
+  const handleCreateFile = useCallback(
+    (parentPath: string) => {
+      captureNewItemFocusFallback();
+      setNewItemType('file');
+      setNewItemParentPath(parentPath);
+    },
+    [captureNewItemFocusFallback]
+  );
 
   // Handle create directory
-  const handleCreateDirectory = useCallback((parentPath: string) => {
-    setNewItemType('directory');
-    setNewItemParentPath(parentPath);
-  }, []);
+  const handleCreateDirectory = useCallback(
+    (parentPath: string) => {
+      captureNewItemFocusFallback();
+      setNewItemType('directory');
+      setNewItemParentPath(parentPath);
+    },
+    [captureNewItemFocusFallback]
+  );
+
+  const handleCreateItemPointerDown = useCallback(() => {
+    captureNewItemFocusFromPointer();
+  }, [captureNewItemFocusFromPointer]);
 
   // Handle new item confirm
   const handleNewItemConfirm = useCallback(
@@ -404,9 +451,16 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
       }
       setNewItemType(null);
       setNewItemParentPath('');
+      restoreNewItemFocus();
     },
-    [newItemType, newItemParentPath, createFile, createDirectory, loadFile]
+    [newItemType, newItemParentPath, createFile, createDirectory, loadFile, restoreNewItemFocus]
   );
+
+  const handleNewItemCancel = useCallback(() => {
+    setNewItemType(null);
+    setNewItemParentPath('');
+    restoreNewItemFocus();
+  }, [restoreNewItemFocus]);
 
   // Handle external file drop
   const handleExternalFileDrop = useCallback(
@@ -692,6 +746,7 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
               onSelectedPathChange={setSelectedFilePath}
               onCreateFile={handleCreateFile}
               onCreateDirectory={handleCreateDirectory}
+              onCreateItemPointerDown={handleCreateItemPointerDown}
               onRename={handleRename}
               onDelete={handleDelete}
               onRefresh={refresh}
@@ -718,7 +773,7 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
       </AnimatePresence>
 
       {/* Editor Area - right panel */}
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-hidden" data-focus-action="context-switch">
         <EditorArea
           ref={editorAreaRef}
           tabs={tabs}
@@ -766,10 +821,7 @@ export function FilePanel({ rootPath, isActive = false, sessionId }: FilePanelPr
         isOpen={newItemType !== null}
         type={newItemType || 'file'}
         onConfirm={handleNewItemConfirm}
-        onCancel={() => {
-          setNewItemType(null);
-          setNewItemParentPath('');
-        }}
+        onCancel={handleNewItemCancel}
       />
 
       {/* Conflict Dialog */}

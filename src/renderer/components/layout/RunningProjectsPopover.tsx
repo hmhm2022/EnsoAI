@@ -15,6 +15,7 @@ import type { TabId } from '@/App/constants';
 import type { Session } from '@/components/chat/SessionBar';
 import { Dialog, DialogPopup } from '@/components/ui/dialog';
 import { toastManager } from '@/components/ui/toast';
+import { useFocusReturn } from '@/hooks/useFocusReturn';
 import { useWorktreeListMultiple } from '@/hooks/useWorktree';
 import { useI18n } from '@/i18n';
 import { matchesKeybinding } from '@/lib/keybinding';
@@ -22,6 +23,7 @@ import { cn } from '@/lib/utils';
 import { useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalStore } from '@/stores/terminal';
+import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { useWorktreeActivityStore } from '@/stores/worktreeActivity';
 
 interface RunningProjectsPopoverProps {
@@ -62,6 +64,12 @@ export function RunningProjectsPopover({
   const [menuProject, setMenuProject] = useState<GroupedProject | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
+  const activeSessionId = useTerminalWriteStore((state) => state.activeSessionId);
+  const {
+    captureFromPointer: captureFocusFromPointer,
+    captureFallback: captureFocusFallback,
+    restore: restoreFocus,
+  } = useFocusReturn(activeSessionId);
 
   const globalKeybindings = useSettingsStore((s) => s.globalKeybindings);
 
@@ -96,13 +104,31 @@ export function RunningProjectsPopover({
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (matchesKeybinding(e, globalKeybindings.runningProjects)) {
         e.preventDefault();
-        setOpen((prev) => !prev);
+        setOpen((prev) => {
+          const next = !prev;
+          if (next) {
+            captureFocusFallback();
+          } else {
+            restoreFocus();
+          }
+          return next;
+        });
       }
     };
 
     window.addEventListener('keydown', handleGlobalKeyDown);
     return () => window.removeEventListener('keydown', handleGlobalKeyDown);
-  }, [globalKeybindings.runningProjects]);
+  }, [captureFocusFallback, globalKeybindings.runningProjects, restoreFocus]);
+
+  const handleOpenChange = useCallback(
+    (nextOpen: boolean) => {
+      setOpen(nextOpen);
+      if (!nextOpen) {
+        restoreFocus();
+      }
+    },
+    [restoreFocus]
+  );
 
   const worktreeByPath = useMemo(() => {
     const map = new Map<string, GitWorktree>();
@@ -270,11 +296,13 @@ export function RunningProjectsPopover({
     <>
       <button
         type="button"
+        data-focus-action="overlay"
         className={cn(
           'relative flex h-8 w-8 items-center justify-center rounded-md no-drag text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors',
           totalRunning > 0 && 'text-green-500'
         )}
         title={t('Running Projects')}
+        onPointerDown={captureFocusFromPointer}
         onClick={() => setOpen(true)}
       >
         <Activity className="h-4 w-4" />
@@ -285,7 +313,7 @@ export function RunningProjectsPopover({
         )}
       </button>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogPopup className="sm:max-w-2xl p-0 overflow-visible" showCloseButton={false}>
           <div ref={dialogRef} className="relative">
             <div className="flex items-center gap-2 border-b px-3 py-2">
