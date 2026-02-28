@@ -5,6 +5,7 @@ import type { Session } from '@/components/chat/SessionBar';
 import type { AgentGroupState } from '@/components/chat/types';
 import { createInitialGroupState } from '@/components/chat/types';
 import {
+  type EnhancedInputCloseReason,
   type FocusPolicyEvent,
   type FocusPolicyState,
   transitionFocusPolicyState,
@@ -27,6 +28,7 @@ export interface EnhancedInputState {
   open: boolean;
   content: string;
   imagePaths: string[];
+  lastCloseReason: EnhancedInputCloseReason | null;
 }
 
 // Default state object (cached and frozen to prevent accidental mutation)
@@ -34,6 +36,7 @@ const DEFAULT_ENHANCED_INPUT_STATE: EnhancedInputState = Object.freeze({
   open: false,
   content: '',
   imagePaths: [],
+  lastCloseReason: null,
 });
 
 // Aggregated state for UI display
@@ -86,7 +89,11 @@ interface AgentSessionsState {
 
   // Enhanced input state actions
   getEnhancedInputState: (sessionId: string) => EnhancedInputState;
-  setEnhancedInputOpen: (sessionId: string, open: boolean) => void;
+  setEnhancedInputOpen: (
+    sessionId: string,
+    open: boolean,
+    closeReason?: EnhancedInputCloseReason
+  ) => void;
   setEnhancedInputContent: (sessionId: string, content: string) => void;
   setEnhancedInputImages: (sessionId: string, imagePaths: string[]) => void;
   clearEnhancedInput: (sessionId: string, keepOpen?: boolean) => void; // Clear content after sending
@@ -211,7 +218,7 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
           // Initialize enhanced input state for new session to ensure auto-popup works
           enhancedInputStates: {
             ...state.enhancedInputStates,
-            [session.id]: { open: false, content: '', imagePaths: [] },
+            [session.id]: { open: false, content: '', imagePaths: [], lastCloseReason: null },
           },
           enhancedInputFocusKeys: {
             ...state.enhancedInputFocusKeys,
@@ -500,13 +507,17 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
       return get().enhancedInputStates[sessionId] ?? DEFAULT_ENHANCED_INPUT_STATE;
     },
 
-    setEnhancedInputOpen: (sessionId, open) =>
+    setEnhancedInputOpen: (sessionId, open, closeReason) =>
       set((prev) => {
         const current = prev.enhancedInputStates[sessionId] ?? DEFAULT_ENHANCED_INPUT_STATE;
         return {
           enhancedInputStates: {
             ...prev.enhancedInputStates,
-            [sessionId]: { ...current, open },
+            [sessionId]: {
+              ...current,
+              open,
+              lastCloseReason: open ? null : (closeReason ?? null),
+            },
           },
         };
       }),
@@ -540,7 +551,12 @@ export const useAgentSessionsStore = create<AgentSessionsState>()(
         return {
           enhancedInputStates: {
             ...prev.enhancedInputStates,
-            [sessionId]: { open: keepOpen, content: '', imagePaths: [] },
+            [sessionId]: {
+              open: keepOpen,
+              content: '',
+              imagePaths: [],
+              lastCloseReason: keepOpen ? null : current.lastCloseReason,
+            },
           },
         };
       }),

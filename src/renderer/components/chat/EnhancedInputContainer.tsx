@@ -1,10 +1,12 @@
 import { memo } from 'react';
+import type { EnhancedInputCloseReason } from '@/lib/focusPolicy';
 import { useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { EnhancedInput } from './EnhancedInput';
 
 interface EnhancedInputContainerProps {
   sessionId: string;
+  onOpenChange: (open: boolean, reason?: EnhancedInputCloseReason) => void;
   onSend: (content: string, imagePaths: string[]) => void;
   /** Whether the parent panel is active (used to trigger focus on tab switch) */
   isActive?: boolean;
@@ -16,12 +18,12 @@ interface EnhancedInputContainerProps {
  */
 export const EnhancedInputContainer = memo(function EnhancedInputContainer({
   sessionId,
+  onOpenChange,
   onSend,
   isActive = false,
 }: EnhancedInputContainerProps) {
   // Subscribe to only this session's enhanced input state
   const enhancedInputState = useAgentSessionsStore((state) => state.enhancedInputStates[sessionId]);
-  const setEnhancedInputOpen = useAgentSessionsStore((state) => state.setEnhancedInputOpen);
   const setEnhancedInputContent = useAgentSessionsStore((state) => state.setEnhancedInputContent);
   const setEnhancedInputImages = useAgentSessionsStore((state) => state.setEnhancedInputImages);
   const clearEnhancedInput = useAgentSessionsStore((state) => state.clearEnhancedInput);
@@ -55,12 +57,7 @@ export const EnhancedInputContainer = memo(function EnhancedInputContainer({
   return (
     <EnhancedInput
       open
-      onOpenChange={(newOpen) => {
-        if (!newOpen) {
-          setEnhancedInputOpen(sessionId, false);
-          transitionEnhancedInputFocusState(sessionId, 'enhanced-close');
-        }
-      }}
+      onOpenChange={onOpenChange}
       onSend={(sendContent, sendImagePaths) => {
         console.log('[EnhancedInput] Sending message');
         onSend(sendContent, sendImagePaths);

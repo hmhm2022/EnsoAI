@@ -8,6 +8,10 @@ import { useFileDrop } from '@/hooks/useFileDrop';
 import { useTerminalScrollToBottom } from '@/hooks/useTerminalScrollToBottom';
 import { useXterm } from '@/hooks/useXterm';
 import { useI18n } from '@/i18n';
+import {
+  type EnhancedInputCloseReason,
+  shouldRestoreFocusAfterEnhancedInputClose,
+} from '@/lib/focusPolicy';
 import { type OutputState, useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -35,7 +39,8 @@ interface AgentTerminalProps {
    * When omitted, AgentTerminal falls back to its own local state.
    */
   enhancedInputOpen?: boolean;
-  onEnhancedInputOpenChange?: (open: boolean) => void;
+  enhancedInputCloseReason?: EnhancedInputCloseReason | null;
+  onEnhancedInputOpenChange?: (open: boolean, reason?: EnhancedInputCloseReason) => void;
   onInitialized?: () => void;
   onActivated?: () => void;
   /** Called when session is activated with the current line content (for session name fallback). */
@@ -73,6 +78,7 @@ export function AgentTerminal({
   isActive = false,
   canMerge = false,
   enhancedInputOpen: externalEnhancedInputOpen,
+  enhancedInputCloseReason,
   onEnhancedInputOpenChange,
   onInitialized,
   onActivated,
@@ -156,9 +162,9 @@ export function AgentTerminal({
     ? externalEnhancedInputOpen
     : localEnhancedInputOpen;
   const setEnhancedInputOpen = useCallback(
-    (open: boolean) => {
+    (open: boolean, reason?: EnhancedInputCloseReason) => {
       if (isExternallyControlled) {
-        onEnhancedInputOpenChange?.(open);
+        onEnhancedInputOpenChange?.(open, reason);
         return;
       }
       setLocalEnhancedInputOpen(open);
@@ -187,7 +193,7 @@ export function AgentTerminal({
         claudeCodeIntegration.enhancedInputEnabled &&
         claudeCodeIntegration.enhancedInputAutoPopup === 'hideWhileRunning'
       ) {
-        onEnhancedInputOpenChange?.(false);
+        onEnhancedInputOpenChange?.(false, 'send');
       }
     },
     [
@@ -571,7 +577,7 @@ export function AgentTerminal({
       // Handle Ctrl+G to toggle enhanced input (only for Claude)
       if (event.ctrlKey && event.code === 'KeyG' && isClaudeAgent) {
         if (claudeCodeIntegration.enhancedInputEnabled) {
-          setEnhancedInputOpen(!enhancedInputOpen);
+          setEnhancedInputOpen(!enhancedInputOpen, enhancedInputOpen ? 'escape' : undefined);
           return false; // Block the key event only when enhanced input is enabled
         }
         // When enhanced input is disabled, let the event pass through to terminal
@@ -752,8 +758,24 @@ export function AgentTerminal({
       return;
     }
 
+    const closeReason = isExternallyControlled ? enhancedInputCloseReason : 'close-button';
+    if (!shouldRestoreFocusAfterEnhancedInputClose(closeReason)) {
+      return;
+    }
+
     requestAnimationFrame(() => terminal?.focus());
+  }, [enhancedInputCloseReason, enhancedInputOpen, isExternallyControlled, terminal]);
+
+  useEffect(() => {
+    if (!terminal) return;
+
+    terminal.options.disableStdin = enhancedInputOpen;
+
+    return () => {
+      terminal.options.disableStdin = false;
+    };
   }, [enhancedInputOpen, terminal]);
+
   const { showScrollToBottom, handleScrollToBottom } = useTerminalScrollToBottom(terminal);
 
   // Register write and focus functions to global store for external access

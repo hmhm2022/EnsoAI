@@ -9,6 +9,13 @@ export type FocusPolicyEvent =
 
 export type FocusAction = 'command' | 'overlay' | 'context-switch' | 'unknown';
 
+export type EnhancedInputCloseReason =
+  | 'send'
+  | 'escape'
+  | 'close-button'
+  | 'click-outside'
+  | 'context-switch';
+
 export const OVERLAY_SELECTOR =
   '[data-slot="dialog-popup"], [data-slot="alert-dialog-popup"], [data-quick-terminal]';
 export const OPEN_OVERLAY_SELECTOR = '[data-overlay-open]';
@@ -38,6 +45,12 @@ export function transitionFocusPolicyState(
 
 export function isFocusPolicyLocked(state: FocusPolicyState): boolean {
   return state === 'locked' || state === 'suspended';
+}
+
+export function shouldRestoreFocusAfterEnhancedInputClose(
+  reason: EnhancedInputCloseReason | null | undefined
+): boolean {
+  return reason === 'send' || reason === 'escape' || reason === 'close-button';
 }
 
 export function isOverlayTarget(target: EventTarget | null): boolean {

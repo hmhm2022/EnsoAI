@@ -5,6 +5,7 @@ import { Dialog, DialogPopup } from '@/components/ui/dialog';
 import { toastManager } from '@/components/ui/toast';
 import { useI18n } from '@/i18n';
 import {
+  type EnhancedInputCloseReason,
   getFocusActionFromTarget,
   isAnyOverlayOpen,
   isBlankAreaTarget,
@@ -23,7 +24,7 @@ function getFileName(filePath: string): string {
 
 interface EnhancedInputProps {
   open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange: (open: boolean, reason?: EnhancedInputCloseReason) => void;
   onSend: (content: string, imagePaths: string[]) => void;
   sessionId?: string;
   /** 外部显式请求聚焦的序号 */
@@ -73,6 +74,7 @@ export function EnhancedInput({
     (state) => state.getEnhancedInputFocusState
   );
   const containerRef = useRef<HTMLDivElement>(null);
+  const rootRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [manualMinH, setManualMinH] = useState<number | null>(null);
@@ -218,6 +220,51 @@ export function EnhancedInput({
     }
   }, [open, sessionId, isActive]);
 
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDownCapture = (event: PointerEvent) => {
+      const root = rootRef.current;
+      if (!root) return;
+
+      const target = event.target;
+      if (target instanceof Element && root.contains(target)) {
+        return;
+      }
+
+      if (isOverlayTarget(target)) {
+        return;
+      }
+
+      const action = getFocusActionFromTarget(target);
+      if (action === 'context-switch') {
+        onOpenChange(false, 'context-switch');
+        return;
+      }
+
+      const focusState = sessionId ? getEnhancedInputFocusState(sessionId) : 'unlocked';
+      if (focusState !== 'locked') {
+        return;
+      }
+
+      if (
+        target instanceof Element &&
+        target.closest(
+          'button, a[href], input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [role="button"], [role="menuitem"], [role="option"]'
+        )
+      ) {
+        return;
+      }
+
+      if (isBlankAreaTarget(target)) {
+        onOpenChange(false, 'click-outside');
+      }
+    };
+
+    window.addEventListener('pointerdown', handlePointerDownCapture, true);
+    return () => window.removeEventListener('pointerdown', handlePointerDownCapture, true);
+  }, [getEnhancedInputFocusState, onOpenChange, open, sessionId]);
+
   const blurTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleFocus = useCallback(() => {
@@ -297,7 +344,7 @@ export function EnhancedInput({
       onSend(content.trim(), imagePaths);
       // Only close panel if not in 'always open' mode
       if (!keepOpenAfterSend) {
-        onOpenChange(false);
+        onOpenChange(false, 'send');
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -344,7 +391,7 @@ export function EnhancedInput({
       // Keep ESC behavior identical to clicking the close (X) button.
       e.preventDefault();
       e.stopPropagation();
-      onOpenChange(false);
+      onOpenChange(false, 'escape');
     },
     [onOpenChange, mentionQuery]
   );
@@ -532,7 +579,7 @@ export function EnhancedInput({
   if (!open) return null;
 
   return (
-    <div className="relative">
+    <div ref={rootRef} className="relative" data-enhanced-input-session={sessionId}>
       {/* @ mention file search popup — outside overflow-hidden container */}
       {mentionQuery !== null && mentionResults.length > 0 && (
         <div className="absolute bottom-full left-3 mb-1 w-72 rounded-lg border bg-popover shadow-lg z-10 overflow-hidden">
@@ -591,7 +638,6 @@ export function EnhancedInput({
 
       <div
         ref={containerRef}
-        data-enhanced-input-session={sessionId}
         className="pointer-events-auto bg-background overflow-hidden border-t"
         onKeyDown={handlePanelKeyDown}
       >
@@ -608,7 +654,7 @@ export function EnhancedInput({
           {/* Close button (top-right) */}
           <button
             type="button"
-            onClick={() => onOpenChange(false)}
+            onClick={() => onOpenChange(false, 'close-button')}
             className="absolute top-1 right-1 h-5 w-5 flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-accent transition-colors z-10"
             aria-label={t('Close')}
           >

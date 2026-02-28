@@ -18,7 +18,9 @@ import { useI18n } from '@/i18n';
 import { getEnhancedInputElement, isTargetInsideEnhancedInputSession } from '@/lib/focus';
 import {
   cycleTabWithinContainer,
+  type EnhancedInputCloseReason,
   getFocusActionFromTarget,
+  isAnyOverlayOpen,
   isFocusPolicyLocked,
   isOverlayTarget,
 } from '@/lib/focusPolicy';
@@ -335,20 +337,64 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
     restore: restoreQuickTerminalFocus,
   } = useFocusReturn(activeAgentSessionId);
 
+  const closeEnhancedInput = useCallback(
+    (sessionId: string, reason?: EnhancedInputCloseReason) => {
+      setEnhancedInputOpen(sessionId, false, reason);
+      transitionEnhancedInputFocusState(
+        sessionId,
+        reason === 'context-switch' ? 'context-switch' : 'enhanced-close'
+      );
+    },
+    [setEnhancedInputOpen, transitionEnhancedInputFocusState]
+  );
+
+  const handleEnhancedInputOpenChange = useCallback(
+    (sessionId: string, open: boolean, reason?: EnhancedInputCloseReason) => {
+      if (open) {
+        setEnhancedInputOpen(sessionId, true);
+        return;
+      }
+
+      closeEnhancedInput(sessionId, reason);
+    },
+    [closeEnhancedInput, setEnhancedInputOpen]
+  );
+
+  const scheduleOverlayClose = useCallback(
+    (sessionId: string | null) => {
+      if (!sessionId) return;
+
+      requestAnimationFrame(() => {
+        if (isAnyOverlayOpen()) {
+          return;
+        }
+        transitionEnhancedInputFocusState(sessionId, 'overlay-close');
+      });
+    },
+    [transitionEnhancedInputFocusState]
+  );
+
   const handleToggleQuickTerminal = useCallback(() => {
     if (!quickTerminalOpen) {
       captureQuickTerminalFocusFallback();
+      if (activeAgentSessionId) {
+        transitionEnhancedInputFocusState(activeAgentSessionId, 'overlay-open');
+      }
       setQuickTerminalOpen(true);
       return;
     }
 
     setQuickTerminalOpen(false);
+    scheduleOverlayClose(activeAgentSessionId);
     restoreQuickTerminalFocus();
   }, [
+    activeAgentSessionId,
     captureQuickTerminalFocusFallback,
     quickTerminalOpen,
     restoreQuickTerminalFocus,
+    scheduleOverlayClose,
     setQuickTerminalOpen,
+    transitionEnhancedInputFocusState,
   ]);
 
   const handleQuickTerminalPointerDown = useCallback(() => {
@@ -358,16 +404,29 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
   const handleQuickTerminalOpenChange = useCallback(
     (open: boolean) => {
       setQuickTerminalOpen(open);
-      if (!open) {
-        restoreQuickTerminalFocus();
+      if (open) {
+        if (activeAgentSessionId) {
+          transitionEnhancedInputFocusState(activeAgentSessionId, 'overlay-open');
+        }
+        return;
       }
+
+      scheduleOverlayClose(activeAgentSessionId);
+      restoreQuickTerminalFocus();
     },
-    [restoreQuickTerminalFocus, setQuickTerminalOpen]
+    [
+      activeAgentSessionId,
+      restoreQuickTerminalFocus,
+      scheduleOverlayClose,
+      setQuickTerminalOpen,
+      transitionEnhancedInputFocusState,
+    ]
   );
 
   const handleCloseQuickTerminal = useCallback(() => {
     // 关闭 modal
     setQuickTerminalOpen(false);
+    scheduleOverlayClose(activeAgentSessionId);
 
     // 清除 session 记录（PTY 由 ShellTerminal 组件卸载时的 cleanup 销毁，这里不要重复调用 destroy）
     if (currentQuickTerminalSession) {
@@ -375,10 +434,12 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
     }
     restoreQuickTerminalFocus();
   }, [
+    activeAgentSessionId,
     currentQuickTerminalSession,
     cwd,
     removeQuickTerminalSession,
     restoreQuickTerminalFocus,
+    scheduleOverlayClose,
     setQuickTerminalOpen,
   ]);
 
@@ -1716,10 +1777,10 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
                   transitionEnhancedInputFocusState(sessionId, 'context-switch');
                 }}
                 enhancedInputOpen={getEnhancedInputState(sessionId).open}
-                onEnhancedInputOpenChange={(open) => {
-                  // EnhancedInput open state is now stored per-session in the store
-                  setEnhancedInputOpen(sessionId, open);
-                }}
+                enhancedInputCloseReason={getEnhancedInputState(sessionId).lastCloseReason}
+                onEnhancedInputOpenChange={(open, reason) =>
+                  handleEnhancedInputOpenChange(sessionId, open, reason)
+                }
                 onRegisterEnhancedInputSender={(senderSessionId, sender) => {
                   enhancedInputSenderRef.current.set(senderSessionId, sender);
                 }}
@@ -1783,6 +1844,9 @@ export function AgentPanel({ repoPath, cwd, isActive = false, onSwitchWorktree }
                 group.activeSessionId != null && (
                   <EnhancedInputContainer
                     sessionId={group.activeSessionId}
+                    onOpenChange={(open, reason) =>
+                      handleEnhancedInputOpenChange(group.activeSessionId!, open, reason)
+                    }
                     onSend={(content, imagePaths) => {
                       sender?.(content, imagePaths);
                     }}
