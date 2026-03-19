@@ -354,6 +354,9 @@ export const defaultQuickTerminalSettings: QuickTerminalSettings = {
   isOpen: false,
 };
 
+// Default Codex View Session Button position
+export const defaultCodexViewSessionButtonPosition = { top: 12, right: 12 };
+
 /**
  * Validate code review prompt template
  * Checks for required variables and unknown placeholders

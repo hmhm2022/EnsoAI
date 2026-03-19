@@ -22,6 +22,7 @@ import {
   defaultMainTabKeybindings,
   defaultProxySettings,
   defaultQuickTerminalSettings,
+  defaultCodexViewSessionButtonPosition,
   defaultSearchKeybindings,
   defaultSourceControlKeybindings,
   defaultTodoPolishSettings,
@@ -190,6 +191,9 @@ function getInitialState() {
 
     // Quick Terminal defaults
     quickTerminal: defaultQuickTerminalSettings,
+
+    // Codex View Session Button defaults
+    codexViewSessionButtonPosition: defaultCodexViewSessionButtonPosition,
 
     // Web Inspector defaults
     webInspectorEnabled: false,
@@ -677,6 +681,10 @@ export const useSettingsStore = create<SettingsState>()(
         set((state) => ({
           quickTerminal: { ...state.quickTerminal, isOpen: open },
         })),
+
+      // Codex View Session Button Setter
+      setCodexViewSessionButtonPosition: (position) =>
+        set({ codexViewSessionButtonPosition: position }),
 
       // Web Inspector Setter
       setWebInspectorEnabled: async (enabled) => {

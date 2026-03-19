@@ -276,6 +276,12 @@ export interface QuickTerminalSettings {
   isOpen: boolean;
 }
 
+// Codex View Session Button position
+export interface CodexViewSessionButtonPosition {
+  top: number;
+  right: number;
+}
+
 // Background image settings
 export type BackgroundSourceType = 'file' | 'folder' | 'url';
 export type BackgroundSizeMode = 'cover' | 'contain' | 'repeat' | 'center';
@@ -386,6 +392,9 @@ export interface SettingsState {
 
   // Quick Terminal settings
   quickTerminal: QuickTerminalSettings;
+
+  // Codex View Session Button position
+  codexViewSessionButtonPosition: CodexViewSessionButtonPosition;
 
   // Web Inspector settings
   webInspectorEnabled: boolean;
@@ -534,6 +543,9 @@ export interface SettingsState {
   setQuickTerminalModalPosition: (position: { x: number; y: number } | null) => void;
   setQuickTerminalModalSize: (size: { width: number; height: number } | null) => void;
   setQuickTerminalOpen: (open: boolean) => void;
+
+  // Setters - Codex View Session Button
+  setCodexViewSessionButtonPosition: (position: CodexViewSessionButtonPosition) => void;
 
   // Setters - Web Inspector
   setWebInspectorEnabled: (enabled: boolean) => void;

@@ -1,6 +1,7 @@
 import type { FileEntry } from '@shared/types';
 import { ArrowDown } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CodexViewSessionButton } from '@/components/chat/CodexViewSessionButton';
 import {
   TerminalSearchBar,
   type TerminalSearchBarRef,
@@ -2512,14 +2513,11 @@ export function AgentTerminal({
         theme={settings.theme}
       />
       {isCodexAgent && (
-        <Button
-          size="xs"
-          variant="outline"
-          className="absolute top-3 right-3 z-10"
+        <CodexViewSessionButton
+          containerRef={terminalWrapperRef}
+          isTranscriptOpen={isTranscriptOpen}
           onClick={openCodexTranscript}
-        >
-          {t('View Session Short')}
-        </Button>
+        />
       )}
       <Dialog open={isTranscriptOpen} onOpenChange={setIsTranscriptOpen}>
         <DialogPopup className="h-[min(80vh,720px)] max-w-5xl">
