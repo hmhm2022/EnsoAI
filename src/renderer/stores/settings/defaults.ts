@@ -6,6 +6,7 @@ import type {
   BranchNameGeneratorSettings,
   ClaudeCodeIntegrationSettings,
   CodeReviewSettings,
+  CodexSessionViewerSettings,
   CommitMessageGeneratorSettings,
   EditorSettings,
   GitCloneSettings,
@@ -356,6 +357,19 @@ export const defaultQuickTerminalSettings: QuickTerminalSettings = {
 
 // Default Codex View Session Button position
 export const defaultCodexViewSessionButtonPosition = { top: 12, right: 12 };
+
+// Default Codex Session Viewer settings
+export const defaultCodexSessionViewerSettings: CodexSessionViewerSettings = {
+  enabled: false,
+  entryFilter: 'full',
+  initialAnchor: 'end',
+  autoRefresh: true,
+  autoRefreshIntervalMs: 3000,
+  showJumpButtons: true,
+  modalHeight: 80,
+  modalWidth: 1200,
+  fontSize: 12,
+};
 
 /**
  * Validate code review prompt template

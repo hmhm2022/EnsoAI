@@ -14,6 +14,8 @@ import {
   defaultBranchNameGeneratorSettings,
   defaultClaudeCodeIntegrationSettings,
   defaultCodeReviewSettings,
+  defaultCodexSessionViewerSettings,
+  defaultCodexViewSessionButtonPosition,
   defaultCommitMessageGeneratorSettings,
   defaultEditorSettings,
   defaultGitCloneSettings,
@@ -22,7 +24,6 @@ import {
   defaultMainTabKeybindings,
   defaultProxySettings,
   defaultQuickTerminalSettings,
-  defaultCodexViewSessionButtonPosition,
   defaultSearchKeybindings,
   defaultSourceControlKeybindings,
   defaultTodoPolishSettings,
@@ -194,6 +195,9 @@ function getInitialState() {
 
     // Codex View Session Button defaults
     codexViewSessionButtonPosition: defaultCodexViewSessionButtonPosition,
+
+    // Codex Session Viewer defaults
+    codexSessionViewer: defaultCodexSessionViewerSettings,
 
     // Web Inspector defaults
     webInspectorEnabled: false,
@@ -685,6 +689,52 @@ export const useSettingsStore = create<SettingsState>()(
       // Codex View Session Button Setter
       setCodexViewSessionButtonPosition: (position) =>
         set({ codexViewSessionButtonPosition: position }),
+
+      // Codex Session Viewer Setters
+      setCodexSessionViewerEnabled: (enabled) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, enabled },
+        })),
+
+      setCodexSessionViewerEntryFilter: (filter) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, entryFilter: filter },
+        })),
+
+      setCodexSessionViewerInitialAnchor: (anchor) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, initialAnchor: anchor },
+        })),
+
+      setCodexSessionViewerAutoRefresh: (enabled) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, autoRefresh: enabled },
+        })),
+
+      setCodexSessionViewerAutoRefreshInterval: (ms) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, autoRefreshIntervalMs: ms },
+        })),
+
+      setCodexSessionViewerShowJumpButtons: (show) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, showJumpButtons: show },
+        })),
+
+      setCodexSessionViewerModalHeight: (height) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, modalHeight: height },
+        })),
+
+      setCodexSessionViewerModalWidth: (width) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, modalWidth: width },
+        })),
+
+      setCodexSessionViewerFontSize: (size) =>
+        set((state) => ({
+          codexSessionViewer: { ...state.codexSessionViewer, fontSize: size },
+        })),
 
       // Web Inspector Setter
       setWebInspectorEnabled: async (enabled) => {

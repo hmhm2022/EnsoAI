@@ -47,6 +47,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
 import { useDetectedApps } from '@/hooks/useAppDetector';
 import { useI18n } from '@/i18n';
@@ -156,6 +157,8 @@ export function GeneralSettings() {
     addHostMapping,
     removeHostMapping,
     updateHostMapping,
+    codexSessionViewer,
+    setCodexSessionViewerEnabled,
   } = useSettingsStore();
   const { t, locale } = useI18n();
   const { data: detectedApps = [] } = useDetectedApps();
@@ -1029,6 +1032,20 @@ export function GeneralSettings() {
             {t('Automatically copy selected text in the terminal to the clipboard')}
           </p>
           <Switch checked={copyOnSelection} onCheckedChange={setCopyOnSelection} />
+        </div>
+      </div>
+
+      {/* Codex Session Viewer */}
+      <div className="grid grid-cols-[100px_1fr] items-center gap-4">
+        <span className="text-sm font-medium">{t('Codex Session Viewer')}</span>
+        <div className="flex items-center justify-between">
+          <p className="text-sm text-muted-foreground">
+            {t('Show Codex session viewer button and enable viewing functionality')}
+          </p>
+          <Switch
+            checked={codexSessionViewer.enabled}
+            onCheckedChange={setCodexSessionViewerEnabled}
+          />
         </div>
       </div>
 

@@ -1,5 +1,5 @@
 import type { FileEntry } from '@shared/types';
-import { ArrowDown } from 'lucide-react';
+import { ArrowDown, ArrowUp, Copy, Minus, Plus, RefreshCw, Settings } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CodexViewSessionButton } from '@/components/chat/CodexViewSessionButton';
 import {
@@ -11,14 +11,25 @@ import {
   Dialog,
   DialogFooter,
   DialogHeader,
-  DialogPanel,
   DialogPopup,
   DialogTitle,
 } from '@/components/ui/dialog';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Slider } from '@/components/ui/slider';
+import { Switch } from '@/components/ui/switch';
 import { useFileDrop } from '@/hooks/useFileDrop';
 import { useTerminalScrollToBottom } from '@/hooks/useTerminalScrollToBottom';
 import { useXterm } from '@/hooks/useXterm';
 import { useI18n } from '@/i18n';
+import { Z_INDEX } from '@/lib/z-index';
+import { toastManager } from '@/components/ui/toast';
 import { type OutputState, useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -125,6 +136,15 @@ interface CodexBoundSession {
   historyTs?: number;
 }
 
+interface CodexHistoryCandidate {
+  sessionId: string | null;
+  sessionFilePath: string;
+  updatedAt: string | null;
+  candidateTime: number;
+  cwd: string | null;
+  entryCount: number;
+}
+
 const EMPTY_CODEX_TRANSCRIPT_STATE: CodexTranscriptState = {
   status: 'idle',
   entries: [],
@@ -144,8 +164,15 @@ const CODEX_TRANSCRIPT_CARD_STYLES: Record<CodexTranscriptEntryKind, string> = {
   'tool-output': 'border-slate-500/25 bg-slate-500/5',
 };
 
-function normalizeCodexTranscriptText(text: string): string {
+function stripAnsiForCodexTranscript(text: string): string {
   return text
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ' ')
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
+    .replace(/\u001b[@-_]/g, ' ');
+}
+
+function normalizeCodexTranscriptText(text: string): string {
+  return stripAnsiForCodexTranscript(text)
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
     .replace(/[ \t]+\n/g, '\n')
@@ -588,10 +615,7 @@ function joinCodexPath(separator: string, ...parts: string[]): string {
 }
 
 function stripAnsiForCodexProbe(text: string): string {
-  return text
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ' ')
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
-    .replace(/\u001b[@-_]/g, ' ');
+  return stripAnsiForCodexTranscript(text);
 }
 
 function extractCodexSessionIdFromProbe(text: string): string | null {
@@ -635,7 +659,8 @@ function buildCodexTranscriptCopyText(
   entries: CodexTranscriptEntry[],
   meta: CodexSessionMetaPayload | null,
   filePath: string,
-  translate?: (key: string) => string
+  translate?: (key: string) => string,
+  locale?: string
 ): string {
   const t = translate ?? ((key: string) => key);
   const lines = [t('Codex Session Record')];
@@ -650,7 +675,7 @@ function buildCodexTranscriptCopyText(
   lines.push('');
 
   for (const entry of entries) {
-    const headerParts = [formatCodexTranscriptEntryTitle(entry, t)];
+    const headerParts = [formatCodexTranscriptEntryTitle(entry, t, locale)];
     if (entry.timestamp) {
       headerParts.push(entry.timestamp);
     }
@@ -666,7 +691,8 @@ function buildCodexTranscriptCopyText(
 
 function formatCodexTranscriptEntryTitle(
   entry: CodexTranscriptEntry,
-  translate?: (key: string) => string
+  translate?: (key: string) => string,
+  locale?: string
 ): string {
   const t = translate ?? ((key: string) => key);
 
@@ -674,7 +700,7 @@ function formatCodexTranscriptEntryTitle(
     case 'user':
       return t('User');
     case 'assistant':
-      return t('Assistant');
+      return locale === 'zh' ? t('Assistant') : t('Agent');
     case 'reasoning':
       return t('Reasoning');
     case 'commentary':
@@ -1100,7 +1126,7 @@ export function AgentTerminal({
   onRegisterEnhancedInputSender,
   onUnregisterEnhancedInputSender,
 }: AgentTerminalProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const baseAgentId = useMemo(() => {
     if (agentId.endsWith('-hapi')) {
       return agentId.slice(0, -5);
@@ -1119,6 +1145,7 @@ export function AgentTerminal({
     shellConfig,
     claudeCodeIntegration,
     glowEffectEnabled,
+    codexSessionViewer,
   } = useSettingsStore();
 
   // Track if hapi is globally installed (cached in main process)
@@ -1187,6 +1214,28 @@ export function AgentTerminal({
   const [codexTranscriptState, setCodexTranscriptState] = useState<CodexTranscriptState>(
     EMPTY_CODEX_TRANSCRIPT_STATE
   );
+  const [codexHistoryCandidates, setCodexHistoryCandidates] = useState<CodexHistoryCandidate[]>([]);
+  const [selectedCodexHistoryPath, setSelectedCodexHistoryPath] = useState<string>('auto');
+  const contentRef = useRef<HTMLDivElement>(null);
+  const shouldApplyCodexInitialScrollRef = useRef(false);
+  const [showCodexScrollToTop, setShowCodexScrollToTop] = useState(false);
+  const [showCodexScrollToBottom, setShowCodexScrollToBottom] = useState(false);
+
+  // Filter entries based on settings
+  const filteredEntries = useMemo(() => {
+    if (codexSessionViewer.entryFilter === 'explain-reply') {
+      return codexTranscriptState.entries.filter(
+        (entry) =>
+          entry.kind === 'user' || entry.kind === 'commentary' || entry.kind === 'assistant'
+      );
+    }
+    return codexTranscriptState.entries;
+  }, [codexTranscriptState.entries, codexSessionViewer.entryFilter]);
+
+  const codexTranscriptTitleFontSize = codexSessionViewer.fontSize + 1;
+  const codexTranscriptMetaFontSize = Math.max(11, codexSessionViewer.fontSize - 1);
+  const codexTranscriptLineHeight = Math.max(18, Math.round(codexSessionViewer.fontSize * 1.6));
+
   const isExternallyControlled = externalEnhancedInputOpen !== undefined;
   const enhancedInputOpen = isExternallyControlled
     ? externalEnhancedInputOpen
@@ -1280,19 +1329,96 @@ export function AgentTerminal({
       .slice(0, MAX_CODEX_SESSION_CANDIDATES);
   }, []);
 
-  const loadCodexTranscript = useCallback(async (): Promise<CodexTranscriptState | null> => {
+  const buildCodexTranscriptStateFromParsed = useCallback(
+    (
+      parsed: CodexTranscriptDocument,
+      sessionFilePath: string,
+      fallbackSessionId?: string | null,
+      fallbackUpdatedAt?: string | null
+    ): CodexTranscriptState => ({
+      status: 'ready',
+      entries: parsed.entries,
+      copyText: buildCodexTranscriptCopyText(
+        parsed.entries,
+        parsed.meta,
+        sessionFilePath,
+        t,
+        locale
+      ),
+      error: null,
+      sessionId: parsed.meta?.id ?? fallbackSessionId ?? null,
+      sessionFilePath,
+      updatedAt: formatCodexTimestamp(parsed.meta?.timestamp) ?? fallbackUpdatedAt ?? null,
+    }),
+    [locale, t]
+  );
+
+  const loadCodexHistoryCandidates = useCallback(async (): Promise<CodexHistoryCandidate[]> => {
     if (!isCodexAgent) {
-      return null;
+      setCodexHistoryCandidates([]);
+      return [];
     }
 
-    const requestId = ++codexTranscriptRequestIdRef.current;
-    setCodexTranscriptState((previous) => ({
-      ...previous,
-      status: 'loading',
-      error: null,
-    }));
+    const normalizedCwd = normalizePathForComparison(cwd);
+    const candidates = await listRecentCodexSessionFiles();
+    const nextCandidates: CodexHistoryCandidate[] = [];
 
-    try {
+    for (const candidate of candidates) {
+      try {
+        const { content } = await window.electronAPI.file.read(candidate.path);
+        const parsed = parseCodexTranscriptDocument(content, candidate.path);
+        if (isCodexTranscriptInvalid(parsed)) {
+          continue;
+        }
+
+        const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
+        if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
+          continue;
+        }
+
+        nextCandidates.push({
+          sessionId: parsed.meta?.id ?? candidate.name.replace(/\.jsonl$/, ''),
+          sessionFilePath: candidate.path,
+          updatedAt:
+            formatCodexTimestamp(parsed.meta?.timestamp) ??
+            formatCodexTimestamp(new Date(candidate.modifiedAt).toISOString()) ??
+            null,
+          candidateTime: getCodexTranscriptCandidateTime(parsed, candidate),
+          cwd: parsed.meta?.cwd ?? null,
+          entryCount: parsed.entries.length,
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    nextCandidates.sort((left, right) => right.candidateTime - left.candidateTime);
+    setCodexHistoryCandidates(nextCandidates);
+    return nextCandidates;
+  }, [cwd, isCodexAgent, listRecentCodexSessionFiles]);
+
+  const loadCodexTranscript = useCallback(
+    async ({
+      silent = false,
+      sessionFilePath,
+    }: {
+      silent?: boolean;
+      sessionFilePath?: string;
+    } = {}): Promise<CodexTranscriptState | null> => {
+      if (!isCodexAgent) {
+        return null;
+      }
+
+      const requestId = ++codexTranscriptRequestIdRef.current;
+      if (!silent) {
+        setCodexTranscriptState((previous) => ({
+          ...previous,
+          status: 'loading',
+          error: null,
+        }));
+      }
+
+      try {
       const homeDir =
         window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
       const separator = window.electronAPI.env.platform === 'win32' ? '\\' : '/';
@@ -1314,369 +1440,579 @@ export function AgentTerminal({
       const observedSessionId = codexObservedSessionIdRef.current;
       const promptObservations = codexPromptObservationsRef.current;
       let invalidBoundSessionPath: string | null = null;
-      const commitTranscriptState = (nextState: CodexTranscriptState): CodexTranscriptState => {
-        if (requestId === codexTranscriptRequestIdRef.current) {
-          setCodexTranscriptState(nextState);
-        }
-        return nextState;
-      };
-      const buildEmptyTranscriptState = (): CodexTranscriptState => ({
-        ...EMPTY_CODEX_TRANSCRIPT_STATE,
-        status: 'ready',
-        sessionId: observedSessionId,
-      });
+        const commitTranscriptState = (nextState: CodexTranscriptState): CodexTranscriptState => {
+          if (requestId === codexTranscriptRequestIdRef.current) {
+            setCodexTranscriptState(nextState);
+          }
+          return nextState;
+        };
+        const buildEmptyTranscriptState = (): CodexTranscriptState => ({
+          ...EMPTY_CODEX_TRANSCRIPT_STATE,
+          status: 'ready',
+          sessionId: observedSessionId,
+        });
 
-      if (
-        boundSession &&
-        observedSessionId &&
-        boundSession.sessionId !== observedSessionId
-      ) {
-        invalidBoundSessionPath = boundSession.sessionFilePath;
-        boundCodexSessionRef.current = null;
-        boundSession = null;
-      }
-
-      if (boundSession) {
-        try {
-          const { content } = await window.electronAPI.file.read(boundSession.sessionFilePath);
+        if (sessionFilePath) {
+          const { content } = await window.electronAPI.file.read(sessionFilePath);
           if (requestId !== codexTranscriptRequestIdRef.current) {
             return null;
           }
 
-          const parsed = parseCodexTranscriptDocument(content, boundSession.sessionFilePath);
+          const parsed = parseCodexTranscriptDocument(content, sessionFilePath);
           const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
           if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
-            throw new Error(t('Bound Codex session record does not match the current workspace.'));
+            throw new Error(t('Selected Codex session does not match the current workspace.'));
           }
           if (isCodexTranscriptInvalid(parsed)) {
             throw new Error(t('Failed to load Codex session record.'));
           }
 
-          const nextState: CodexTranscriptState = {
-            status: 'ready',
-            entries: parsed.entries,
-            copyText: buildCodexTranscriptCopyText(
-              parsed.entries,
-              parsed.meta,
+          return commitTranscriptState(
+            buildCodexTranscriptStateFromParsed(
+              parsed,
+              sessionFilePath,
+              parsed.meta?.id ?? sessionFilePath.split(/[\\/]/).pop()?.replace(/\.jsonl$/, '') ?? null
+            )
+          );
+        }
+
+        if (
+          boundSession &&
+          observedSessionId &&
+          boundSession.sessionId !== observedSessionId
+        ) {
+          invalidBoundSessionPath = boundSession.sessionFilePath;
+          boundCodexSessionRef.current = null;
+          boundSession = null;
+        }
+
+        if (boundSession) {
+          try {
+            const { content } = await window.electronAPI.file.read(boundSession.sessionFilePath);
+            if (requestId !== codexTranscriptRequestIdRef.current) {
+              return null;
+            }
+
+            const parsed = parseCodexTranscriptDocument(content, boundSession.sessionFilePath);
+            const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
+            if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
+              throw new Error(t('Bound Codex session record does not match the current workspace.'));
+            }
+            if (isCodexTranscriptInvalid(parsed)) {
+              throw new Error(t('Failed to load Codex session record.'));
+            }
+
+            const nextState = buildCodexTranscriptStateFromParsed(
+              parsed,
               boundSession.sessionFilePath,
-              t
-            ),
-            error: null,
-            sessionId: parsed.meta?.id ?? boundSession.sessionId,
-            sessionFilePath: boundSession.sessionFilePath,
-            updatedAt:
-              formatCodexTimestamp(parsed.meta?.timestamp) ??
-              codexTranscriptState.updatedAt ??
-              null,
+              boundSession.sessionId,
+              codexTranscriptState.updatedAt
+            );
+
+            return commitTranscriptState(nextState);
+          } catch {
+            invalidBoundSessionPath = boundSession.sessionFilePath;
+            boundCodexSessionRef.current = null;
+          }
+        }
+
+        let recentHistoryRecords: Array<{ sessionId: string; ts?: number }> = [];
+        if (await window.electronAPI.file.exists(historyPath)) {
+          const { content } = await window.electronAPI.file.read(historyPath);
+          recentHistoryRecords = extractRecentCodexHistoryRecords(content).sort((left, right) => {
+            const preferredDiff =
+              Number(right.sessionId === observedSessionId) -
+              Number(left.sessionId === observedSessionId);
+            if (preferredDiff !== 0) {
+              return preferredDiff;
+            }
+            const baselineDiff =
+              Number(typeof right.ts === 'number' && right.ts > (historyBaselineTs ?? -Infinity)) -
+              Number(typeof left.ts === 'number' && left.ts > (historyBaselineTs ?? -Infinity));
+            if (baselineDiff !== 0) {
+              return baselineDiff;
+            }
+            const distanceDiff =
+              scoreCodexHistoryRecordForSession(left, sessionAnchorTime) -
+              scoreCodexHistoryRecordForSession(right, sessionAnchorTime);
+            if (distanceDiff !== 0) {
+              return distanceDiff;
+            }
+            return (right.ts ?? 0) - (left.ts ?? 0);
+          });
+        }
+
+        const recentHistoryRecordsAfterBaseline =
+          historyBaselineTs === null
+            ? recentHistoryRecords
+            : recentHistoryRecords.filter(
+                (record) =>
+                  record.sessionId === observedSessionId ||
+                  (typeof record.ts === 'number' && record.ts > historyBaselineTs)
+              );
+        const hasCurrentSessionEvidence =
+          observedSessionId !== null || promptObservations.length > 0;
+        const shouldAvoidOlderTranscriptFallback =
+          historyBaselineTs !== null && hasCurrentSessionEvidence;
+        const prioritizedHistoryRecords = shouldAvoidOlderTranscriptFallback
+          ? recentHistoryRecordsAfterBaseline
+          : recentHistoryRecords;
+
+        if (
+          historyBaselineTs !== null &&
+          !hasCurrentSessionEvidence &&
+          recentHistoryRecordsAfterBaseline.length === 0
+        ) {
+          return commitTranscriptState(buildEmptyTranscriptState());
+        }
+
+        if (
+          shouldAvoidOlderTranscriptFallback &&
+          recentHistoryRecordsAfterBaseline.length === 0
+        ) {
+          return commitTranscriptState(buildEmptyTranscriptState());
+        }
+
+        let exactMatch:
+          | {
+              entry: FileEntry;
+              parsed: CodexTranscriptDocument;
+              candidateTime: number;
+              promptScore: number;
+              observedSessionIdMatch: boolean;
+            }
+          | null = null;
+
+        for (const historyRecord of prioritizedHistoryRecords) {
+          const dayPaths = buildCodexSessionDayPaths(codexHome, historyRecord.ts);
+          let exactCandidate: FileEntry | null = null;
+
+          for (const dayPath of dayPaths) {
+            const dayFiles = await listCodexDirectorySafely(dayPath);
+            if (dayFiles.length === 0) {
+              continue;
+            }
+            exactCandidate =
+              dayFiles.find(
+                (candidate) =>
+                  !candidate.isDirectory &&
+                  candidate.path !== invalidBoundSessionPath &&
+                  candidate.path.endsWith(`${historyRecord.sessionId}.jsonl`)
+              ) ?? null;
+            if (exactCandidate) {
+              break;
+            }
+          }
+
+          if (!exactCandidate) {
+            continue;
+          }
+          try {
+            const { content } = await window.electronAPI.file.read(exactCandidate.path);
+            if (requestId !== codexTranscriptRequestIdRef.current) {
+              return null;
+            }
+
+            const parsed = parseCodexTranscriptDocument(content, exactCandidate.path);
+            const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
+            if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
+              continue;
+            }
+            if (isCodexTranscriptInvalid(parsed)) {
+              continue;
+            }
+            const candidateSessionId = parsed.meta?.id ?? historyRecord.sessionId;
+            exactMatch = pickBetterCodexTranscriptMatch(
+              exactMatch,
+              {
+                entry: exactCandidate,
+                parsed,
+                candidateTime: getCodexTranscriptCandidateTime(parsed, exactCandidate),
+                promptScore: scoreCodexPromptObservationForTranscript(parsed, promptObservations),
+                observedSessionIdMatch:
+                  observedSessionId !== null && candidateSessionId === observedSessionId,
+              },
+              sessionAnchorTime
+            );
+          } catch {
+            continue;
+          }
+        }
+
+        if (exactMatch) {
+          const nextState = buildCodexTranscriptStateFromParsed(
+            exactMatch.parsed,
+            exactMatch.entry.path,
+            exactMatch.entry.name.replace(/\.jsonl$/, ''),
+            formatCodexTimestamp(new Date(exactMatch.entry.modifiedAt).toISOString()) ?? null
+          );
+          boundCodexSessionRef.current = {
+            sessionId: nextState.sessionId ?? exactMatch.entry.name.replace(/\.jsonl$/, ''),
+            sessionFilePath: exactMatch.entry.path,
           };
 
           return commitTranscriptState(nextState);
-        } catch {
-          invalidBoundSessionPath = boundSession.sessionFilePath;
-          boundCodexSessionRef.current = null;
-        }
-      }
-
-      let recentHistoryRecords: Array<{ sessionId: string; ts?: number }> = [];
-      if (await window.electronAPI.file.exists(historyPath)) {
-        const { content } = await window.electronAPI.file.read(historyPath);
-        recentHistoryRecords = extractRecentCodexHistoryRecords(content).sort((left, right) => {
-          const preferredDiff =
-            Number(right.sessionId === observedSessionId) -
-            Number(left.sessionId === observedSessionId);
-          if (preferredDiff !== 0) {
-            return preferredDiff;
-          }
-          const baselineDiff =
-            Number(typeof right.ts === 'number' && right.ts > (historyBaselineTs ?? -Infinity)) -
-            Number(typeof left.ts === 'number' && left.ts > (historyBaselineTs ?? -Infinity));
-          if (baselineDiff !== 0) {
-            return baselineDiff;
-          }
-          const distanceDiff =
-            scoreCodexHistoryRecordForSession(left, sessionAnchorTime) -
-            scoreCodexHistoryRecordForSession(right, sessionAnchorTime);
-          if (distanceDiff !== 0) {
-            return distanceDiff;
-          }
-          return (right.ts ?? 0) - (left.ts ?? 0);
-        });
-      }
-
-      const recentHistoryRecordsAfterBaseline =
-        historyBaselineTs === null
-          ? recentHistoryRecords
-          : recentHistoryRecords.filter(
-              (record) =>
-                record.sessionId === observedSessionId ||
-                (typeof record.ts === 'number' && record.ts > historyBaselineTs)
-            );
-      const hasCurrentSessionEvidence =
-        observedSessionId !== null || promptObservations.length > 0;
-      const shouldAvoidOlderTranscriptFallback =
-        historyBaselineTs !== null && hasCurrentSessionEvidence;
-      const prioritizedHistoryRecords = shouldAvoidOlderTranscriptFallback
-        ? recentHistoryRecordsAfterBaseline
-        : recentHistoryRecords;
-
-      if (
-        historyBaselineTs !== null &&
-        !hasCurrentSessionEvidence &&
-        recentHistoryRecordsAfterBaseline.length === 0
-      ) {
-        return commitTranscriptState(buildEmptyTranscriptState());
-      }
-
-      if (
-        shouldAvoidOlderTranscriptFallback &&
-        recentHistoryRecordsAfterBaseline.length === 0
-      ) {
-        return commitTranscriptState(buildEmptyTranscriptState());
-      }
-
-      let exactMatch:
-        | {
-            entry: FileEntry;
-            parsed: CodexTranscriptDocument;
-            candidateTime: number;
-            promptScore: number;
-            observedSessionIdMatch: boolean;
-          }
-        | null = null;
-
-      for (const historyRecord of prioritizedHistoryRecords) {
-        const dayPaths = buildCodexSessionDayPaths(codexHome, historyRecord.ts);
-        let exactCandidate: FileEntry | null = null;
-
-        for (const dayPath of dayPaths) {
-          const dayFiles = await listCodexDirectorySafely(dayPath);
-          if (dayFiles.length === 0) {
-            continue;
-          }
-          exactCandidate =
-            dayFiles.find(
-              (candidate) =>
-                !candidate.isDirectory &&
-                candidate.path !== invalidBoundSessionPath &&
-                candidate.path.endsWith(`${historyRecord.sessionId}.jsonl`)
-            ) ?? null;
-          if (exactCandidate) {
-            break;
-          }
         }
 
-        if (!exactCandidate) {
-          continue;
+        const candidates = await listRecentCodexSessionFiles();
+        if (requestId !== codexTranscriptRequestIdRef.current) {
+          return null;
+        }
+        if (candidates.length === 0) {
+          return commitTranscriptState(buildEmptyTranscriptState());
         }
 
-        try {
-          const { content } = await window.electronAPI.file.read(exactCandidate.path);
-          if (requestId !== codexTranscriptRequestIdRef.current) {
-            return null;
-          }
+        let preferredFallbackMatch:
+          | {
+              entry: FileEntry;
+              parsed: CodexTranscriptDocument;
+              candidateTime: number;
+              promptScore: number;
+              observedSessionIdMatch: boolean;
+            }
+          | null = null;
+        let recentFallbackMatch:
+          | {
+              entry: FileEntry;
+              parsed: CodexTranscriptDocument;
+              candidateTime: number;
+              promptScore: number;
+              observedSessionIdMatch: boolean;
+            }
+          | null = null;
+        let fallbackMatch:
+          | {
+              entry: FileEntry;
+              parsed: CodexTranscriptDocument;
+              candidateTime: number;
+              promptScore: number;
+              observedSessionIdMatch: boolean;
+            }
+          | null = null;
 
-          const parsed = parseCodexTranscriptDocument(content, exactCandidate.path);
-          const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
-          if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
+        for (const candidate of candidates) {
+          if (candidate.path === invalidBoundSessionPath) {
             continue;
           }
-          if (isCodexTranscriptInvalid(parsed)) {
-            continue;
-          }
-          const candidateSessionId = parsed.meta?.id ?? historyRecord.sessionId;
-          exactMatch = pickBetterCodexTranscriptMatch(
-            exactMatch,
-            {
-              entry: exactCandidate,
+          try {
+            const { content } = await window.electronAPI.file.read(candidate.path);
+            if (requestId !== codexTranscriptRequestIdRef.current) {
+              return null;
+            }
+
+            const parsed = parseCodexTranscriptDocument(content, candidate.path);
+            const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
+            if (normalizedCwd && parsedCwd !== normalizedCwd) {
+              continue;
+            }
+            if (isCodexTranscriptInvalid(parsed)) {
+              continue;
+            }
+
+            const candidateTime = getCodexTranscriptCandidateTime(parsed, candidate);
+            const candidateSessionId = parsed.meta?.id ?? candidate.name.replace(/\.jsonl$/, '');
+            const nextMatch = {
+              entry: candidate,
               parsed,
-              candidateTime: getCodexTranscriptCandidateTime(parsed, exactCandidate),
+              candidateTime,
               promptScore: scoreCodexPromptObservationForTranscript(parsed, promptObservations),
               observedSessionIdMatch:
                 observedSessionId !== null && candidateSessionId === observedSessionId,
-            },
-            sessionAnchorTime
-          );
-        } catch {
-          continue;
-        }
-      }
+            };
 
-      if (exactMatch) {
-        const nextState: CodexTranscriptState = {
-          status: 'ready',
-          entries: exactMatch.parsed.entries,
-          copyText: buildCodexTranscriptCopyText(
-            exactMatch.parsed.entries,
-            exactMatch.parsed.meta,
-            exactMatch.entry.path,
-            t
-          ),
-          error: null,
-          sessionId: exactMatch.parsed.meta?.id ?? exactMatch.entry.name.replace(/\.jsonl$/, ''),
-          sessionFilePath: exactMatch.entry.path,
-          updatedAt:
-            formatCodexTimestamp(exactMatch.parsed.meta?.timestamp) ??
-            formatCodexTimestamp(new Date(exactMatch.entry.modifiedAt).toISOString()) ??
-            null,
-        };
-        boundCodexSessionRef.current = {
-          sessionId: nextState.sessionId ?? exactMatch.entry.name.replace(/\.jsonl$/, ''),
-          sessionFilePath: exactMatch.entry.path,
-        };
+            if (observedSessionId && candidate.path.endsWith(`${observedSessionId}.jsonl`)) {
+              preferredFallbackMatch = nextMatch;
+              break;
+            }
 
-        return commitTranscriptState(nextState);
-      }
-
-      const candidates = await listRecentCodexSessionFiles();
-      if (requestId !== codexTranscriptRequestIdRef.current) {
-        return null;
-      }
-      if (candidates.length === 0) {
-        return commitTranscriptState(buildEmptyTranscriptState());
-      }
-
-      let preferredFallbackMatch:
-        | {
-            entry: FileEntry;
-            parsed: CodexTranscriptDocument;
-            candidateTime: number;
-            promptScore: number;
-            observedSessionIdMatch: boolean;
-          }
-        | null = null;
-      let recentFallbackMatch:
-        | {
-            entry: FileEntry;
-            parsed: CodexTranscriptDocument;
-            candidateTime: number;
-            promptScore: number;
-            observedSessionIdMatch: boolean;
-          }
-        | null = null;
-      let fallbackMatch:
-        | {
-            entry: FileEntry;
-            parsed: CodexTranscriptDocument;
-            candidateTime: number;
-            promptScore: number;
-            observedSessionIdMatch: boolean;
-          }
-        | null = null;
-
-      for (const candidate of candidates) {
-        if (candidate.path === invalidBoundSessionPath) {
-          continue;
-        }
-        try {
-          const { content } = await window.electronAPI.file.read(candidate.path);
-          if (requestId !== codexTranscriptRequestIdRef.current) {
-            return null;
-          }
-
-          const parsed = parseCodexTranscriptDocument(content, candidate.path);
-          const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
-          if (normalizedCwd && parsedCwd !== normalizedCwd) {
-            continue;
-          }
-          if (isCodexTranscriptInvalid(parsed)) {
-            continue;
-          }
-
-          const candidateTime = getCodexTranscriptCandidateTime(parsed, candidate);
-          const candidateSessionId = parsed.meta?.id ?? candidate.name.replace(/\.jsonl$/, '');
-          const nextMatch = {
-            entry: candidate,
-            parsed,
-            candidateTime,
-            promptScore: scoreCodexPromptObservationForTranscript(parsed, promptObservations),
-            observedSessionIdMatch:
-              observedSessionId !== null && candidateSessionId === observedSessionId,
-          };
-
-          if (observedSessionId && candidate.path.endsWith(`${observedSessionId}.jsonl`)) {
-            preferredFallbackMatch = nextMatch;
-            break;
-          }
-
-          if (historyBaselineTs !== null && candidateTime > historyBaselineTs * 1000) {
-            recentFallbackMatch = pickBetterCodexTranscriptMatch(
-              recentFallbackMatch,
+            if (historyBaselineTs !== null && candidateTime > historyBaselineTs * 1000) {
+              recentFallbackMatch = pickBetterCodexTranscriptMatch(
+                recentFallbackMatch,
+                nextMatch,
+                sessionAnchorTime
+              );
+            }
+            fallbackMatch = pickBetterCodexTranscriptMatch(
+              fallbackMatch,
               nextMatch,
               sessionAnchorTime
             );
+          } catch {
+            continue;
           }
-          fallbackMatch = pickBetterCodexTranscriptMatch(
-            fallbackMatch,
-            nextMatch,
-            sessionAnchorTime
-          );
-        } catch {
-          continue;
         }
-      }
 
-      const selectedFallbackMatch = shouldAvoidOlderTranscriptFallback
-        ? preferredFallbackMatch ?? recentFallbackMatch
-        : preferredFallbackMatch ?? recentFallbackMatch ?? fallbackMatch;
+        const selectedFallbackMatch = shouldAvoidOlderTranscriptFallback
+          ? preferredFallbackMatch ?? recentFallbackMatch
+          : preferredFallbackMatch ?? recentFallbackMatch ?? fallbackMatch;
 
-      if (!selectedFallbackMatch) {
-        return commitTranscriptState(buildEmptyTranscriptState());
-      }
+        if (!selectedFallbackMatch) {
+          return commitTranscriptState(buildEmptyTranscriptState());
+        }
 
-      const nextState: CodexTranscriptState = {
-        status: 'ready',
-        entries: selectedFallbackMatch.parsed.entries,
-        copyText: buildCodexTranscriptCopyText(
-          selectedFallbackMatch.parsed.entries,
-          selectedFallbackMatch.parsed.meta,
+        const nextState = buildCodexTranscriptStateFromParsed(
+          selectedFallbackMatch.parsed,
           selectedFallbackMatch.entry.path,
-          t
-        ),
-        error: null,
-        sessionId: selectedFallbackMatch.parsed.meta?.id ?? null,
-        sessionFilePath: selectedFallbackMatch.entry.path,
-        updatedAt:
-          formatCodexTimestamp(selectedFallbackMatch.parsed.meta?.timestamp) ??
-          formatCodexTimestamp(new Date(selectedFallbackMatch.entry.modifiedAt).toISOString()) ??
-          null,
-      };
-      boundCodexSessionRef.current = {
-        sessionId:
-          nextState.sessionId ?? selectedFallbackMatch.entry.name.replace(/\.jsonl$/, ''),
-        sessionFilePath: selectedFallbackMatch.entry.path,
-      };
+          selectedFallbackMatch.entry.name.replace(/\.jsonl$/, ''),
+          formatCodexTimestamp(new Date(selectedFallbackMatch.entry.modifiedAt).toISOString()) ?? null
+        );
+        boundCodexSessionRef.current = {
+          sessionId:
+            nextState.sessionId ?? selectedFallbackMatch.entry.name.replace(/\.jsonl$/, ''),
+          sessionFilePath: selectedFallbackMatch.entry.path,
+        };
 
-      return commitTranscriptState(nextState);
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : t('Failed to load Codex session record.');
-      const nextState: CodexTranscriptState = {
-        ...EMPTY_CODEX_TRANSCRIPT_STATE,
-        status: 'error',
-        error: message,
-      };
+        return commitTranscriptState(nextState);
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : t('Failed to load Codex session record.');
+        const nextState: CodexTranscriptState = silent
+          ? {
+              ...codexTranscriptState,
+              error: message,
+            }
+          : {
+              ...EMPTY_CODEX_TRANSCRIPT_STATE,
+              status: 'error',
+              error: message,
+            };
 
-      if (requestId === codexTranscriptRequestIdRef.current) {
-        setCodexTranscriptState(nextState);
+        if (requestId === codexTranscriptRequestIdRef.current) {
+          setCodexTranscriptState(nextState);
+        }
+
+        return nextState;
       }
+    },
+    [
+      buildCodexTranscriptStateFromParsed,
+      codexTranscriptState,
+      cwd,
+      isCodexAgent,
+      listRecentCodexSessionFiles,
+      t,
+    ]
+  );
 
-      return nextState;
+  const loadSelectedCodexTranscript = useCallback(
+    (options: { silent?: boolean; selectedPath?: string | null } = {}) => {
+      const selectedPath =
+        options.selectedPath !== undefined
+          ? options.selectedPath
+          : selectedCodexHistoryPath === 'auto'
+            ? null
+            : selectedCodexHistoryPath;
+      return loadCodexTranscript({
+        silent: options.silent,
+        sessionFilePath: selectedPath ?? undefined,
+      });
+    },
+    [loadCodexTranscript, selectedCodexHistoryPath]
+  );
+
+  const codexHistoryOptions = useMemo(() => {
+    const options = [...codexHistoryCandidates];
+    if (
+      codexTranscriptState.sessionFilePath &&
+      !options.some((item) => item.sessionFilePath === codexTranscriptState.sessionFilePath)
+    ) {
+      options.unshift({
+        sessionId: codexTranscriptState.sessionId,
+        sessionFilePath: codexTranscriptState.sessionFilePath,
+        updatedAt: codexTranscriptState.updatedAt,
+        candidateTime: codexTranscriptState.updatedAt
+          ? Date.parse(codexTranscriptState.updatedAt)
+          : Number.MAX_SAFE_INTEGER,
+        cwd,
+        entryCount: codexTranscriptState.entries.length,
+      });
     }
-  }, [codexTranscriptState.updatedAt, cwd, isCodexAgent, listRecentCodexSessionFiles, t]);
+    return options;
+  }, [codexHistoryCandidates, codexTranscriptState, cwd]);
+
+  const selectedCodexHistoryCandidate = useMemo(
+    () =>
+      selectedCodexHistoryPath === 'auto'
+        ? null
+        : codexHistoryOptions.find((item) => item.sessionFilePath === selectedCodexHistoryPath) ?? null,
+    [codexHistoryOptions, selectedCodexHistoryPath]
+  );
+
+  const codexHistorySelectLabel = useMemo(() => {
+    if (selectedCodexHistoryPath === 'auto') {
+      return t('Current Session');
+    }
+    if (!selectedCodexHistoryCandidate) {
+      return t('History Session');
+    }
+    const sessionLabel = selectedCodexHistoryCandidate.sessionId
+      ? selectedCodexHistoryCandidate.sessionId.slice(0, 8)
+      : t('History Session');
+    return selectedCodexHistoryCandidate.updatedAt
+      ? `${selectedCodexHistoryCandidate.updatedAt} · ${sessionLabel}`
+      : sessionLabel;
+  }, [selectedCodexHistoryCandidate, selectedCodexHistoryPath, t]);
 
   const openCodexTranscript = useCallback(() => {
+    shouldApplyCodexInitialScrollRef.current = true;
+    setSelectedCodexHistoryPath('auto');
     setIsTranscriptOpen(true);
     onFocus?.();
+    void loadCodexHistoryCandidates();
     void loadCodexTranscript();
-  }, [loadCodexTranscript, onFocus]);
+  }, [loadCodexHistoryCandidates, loadCodexTranscript, onFocus]);
+
+  const handleCodexTranscriptOpenChange = useCallback((open: boolean) => {
+    setIsTranscriptOpen(open);
+    if (!open) {
+      setSelectedCodexHistoryPath('auto');
+    }
+  }, []);
+
+  const handleCodexHistoryChange = useCallback(
+    (value: string) => {
+      shouldApplyCodexInitialScrollRef.current = true;
+      setSelectedCodexHistoryPath(value);
+      void loadCodexTranscript({
+        sessionFilePath: value === 'auto' ? undefined : value,
+      });
+    },
+    [loadCodexTranscript]
+  );
+
+  const handleReloadCodexTranscript = useCallback(async () => {
+    const refreshedCandidates = await loadCodexHistoryCandidates();
+    if (selectedCodexHistoryPath !== 'auto') {
+      const stillExists = refreshedCandidates.some(
+        (item) => item.sessionFilePath === selectedCodexHistoryPath
+      );
+      if (!stillExists) {
+        setSelectedCodexHistoryPath('auto');
+        await loadCodexTranscript();
+        return;
+      }
+    }
+    await loadSelectedCodexTranscript();
+  }, [
+    loadCodexHistoryCandidates,
+    loadCodexTranscript,
+    loadSelectedCodexTranscript,
+    selectedCodexHistoryPath,
+  ]);
+
+  // Apply initial scroll position when dialog opens or content loads
+  useEffect(() => {
+    if (!isTranscriptOpen || !contentRef.current) return;
+    if (codexTranscriptState.status !== 'ready') return;
+    if (!shouldApplyCodexInitialScrollRef.current) return;
+
+    const container = contentRef.current;
+    if (codexSessionViewer.initialAnchor === 'end') {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      container.scrollTop = 0;
+    }
+    shouldApplyCodexInitialScrollRef.current = false;
+  }, [isTranscriptOpen, codexTranscriptState.status, codexSessionViewer.initialAnchor]);
+
+  // Auto refresh logic with silent mode
+  useEffect(() => {
+    if (!isTranscriptOpen) return;
+    if (!codexSessionViewer.enabled || !codexSessionViewer.autoRefresh) return;
+    if (selectedCodexHistoryPath !== 'auto') return;
+
+    const container = contentRef.current;
+    if (!container) return;
+
+    const interval = setInterval(() => {
+      void loadSelectedCodexTranscript({ silent: true }).then(() => {
+        // Auto refresh behaves like terminal follow mode: always keep the latest entries in view.
+        if (container) {
+          container.scrollTop = container.scrollHeight;
+        }
+      });
+    }, codexSessionViewer.autoRefreshIntervalMs);
+
+    return () => clearInterval(interval);
+  }, [
+    isTranscriptOpen,
+    codexSessionViewer.enabled,
+    codexSessionViewer.autoRefresh,
+    codexSessionViewer.autoRefreshIntervalMs,
+    loadSelectedCodexTranscript,
+    selectedCodexHistoryPath,
+  ]);
+
+  // Track scroll position for jump buttons
+  useEffect(() => {
+    if (!codexSessionViewer.showJumpButtons) {
+      setShowCodexScrollToTop(false);
+      setShowCodexScrollToBottom(false);
+      return;
+    }
+
+    const container = contentRef.current;
+    if (!container) return;
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container;
+      const isScrollable = scrollHeight > clientHeight;
+      setShowCodexScrollToTop(isScrollable && scrollTop > 30);
+      setShowCodexScrollToBottom(isScrollable && scrollHeight - scrollTop - clientHeight > 30);
+    };
+
+    container.addEventListener('scroll', handleScroll);
+    handleScroll(); // Initial check
+
+    return () => container.removeEventListener('scroll', handleScroll);
+  }, [codexSessionViewer.showJumpButtons, filteredEntries]);
+
+  const handleScrollToTop = useCallback(() => {
+    useSettingsStore.getState().setCodexSessionViewerAutoRefresh(false);
+    if (contentRef.current) {
+      contentRef.current.scrollTop = 0;
+    }
+  }, []);
+
+  const handleScrollToBottomCodex = useCallback(() => {
+    useSettingsStore.getState().setCodexSessionViewerAutoRefresh(false);
+    if (contentRef.current) {
+      contentRef.current.scrollTop = contentRef.current.scrollHeight;
+    }
+  }, []);
 
   const copyCodexTranscript = useCallback(async () => {
-    const transcript = await loadCodexTranscript();
+    const transcript = await loadSelectedCodexTranscript();
     if (!transcript?.copyText) {
       return;
     }
     await navigator.clipboard.writeText(transcript.copyText);
-  }, [loadCodexTranscript]);
+  }, [loadSelectedCodexTranscript]);
+
+  // Copy single entry content
+  const copyEntryContent = useCallback(
+    async (entry: CodexTranscriptEntry) => {
+      try {
+        const content = formatCodexTranscriptEntryBody(entry, t);
+        await navigator.clipboard.writeText(content);
+        toastManager.add({
+          title: t('Copied'),
+          description: t('Content copied to clipboard'),
+          type: 'success',
+          timeout: 2000,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toastManager.add({
+          title: t('Copy failed'),
+          description: message || t('Failed to copy content'),
+          type: 'error',
+          timeout: 3000,
+        });
+      }
+    },
+    [t]
+  );
 
   // Helper to update output state (with ref tracking to avoid unnecessary store updates)
   const updateOutputState = useCallback(
@@ -2512,37 +2848,271 @@ export function AgentTerminal({
         onClearSearch={clearSearch}
         theme={settings.theme}
       />
-      {isCodexAgent && (
+      {isCodexAgent && codexSessionViewer.enabled && (
         <CodexViewSessionButton
           containerRef={terminalWrapperRef}
           isTranscriptOpen={isTranscriptOpen}
           onClick={openCodexTranscript}
         />
       )}
-      <Dialog open={isTranscriptOpen} onOpenChange={setIsTranscriptOpen}>
-        <DialogPopup className="h-[min(80vh,720px)] max-w-5xl">
+      <Dialog open={isTranscriptOpen} onOpenChange={handleCodexTranscriptOpenChange}>
+        <DialogPopup
+          className="max-w-none"
+          style={{
+            height: `min(${codexSessionViewer.modalHeight}vh, calc(100vh - 80px))`,
+            width: `min(${codexSessionViewer.modalWidth}px, calc(100vw - 80px))`,
+            maxHeight: 'calc(100vh - 80px)',
+            maxWidth: 'calc(100vw - 80px)',
+          }}
+        >
           <DialogHeader>
-            <DialogTitle>{t('Codex Session')}</DialogTitle>
+            <div className="flex items-center justify-between gap-4 pr-10">
+              <DialogTitle>{t('Codex Session')}</DialogTitle>
+
+              {/* Toolbar */}
+              <div className="flex items-center gap-2">
+                {/* More Settings Popover */}
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button size="sm" variant="ghost" className="h-7 w-7 p-0" title={t('More settings')}>
+                      <Settings className="h-3 w-3" />
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    className="w-80"
+                    side="bottom"
+                    align="end"
+                    zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                  >
+                    <div className="space-y-4">
+                      <div>
+                        <h4 className="text-sm font-medium mb-3">{t('Refresh Settings')}</h4>
+                        <div className="space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm">{t('Auto Refresh')}</span>
+                            <Switch
+                              checked={codexSessionViewer.autoRefresh}
+                              onCheckedChange={(checked) => {
+                                useSettingsStore.getState().setCodexSessionViewerAutoRefresh(checked);
+                              }}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <span className="text-sm">{t('Refresh Interval')}</span>
+                            <Select
+                              value={String(codexSessionViewer.autoRefreshIntervalMs)}
+                              onValueChange={(v) => {
+                                useSettingsStore.getState().setCodexSessionViewerAutoRefreshInterval(Number(v));
+                              }}
+                              disabled={!codexSessionViewer.autoRefresh}
+                            >
+                              <SelectTrigger className="w-full" size="sm">
+                                <SelectValue>
+                                  {codexSessionViewer.autoRefreshIntervalMs === 2000
+                                    ? t('2 seconds')
+                                    : codexSessionViewer.autoRefreshIntervalMs === 3000
+                                      ? t('3 seconds')
+                                      : t('5 seconds')}
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                                <SelectItem value="2000">{t('2 seconds')}</SelectItem>
+                                <SelectItem value="3000">{t('3 seconds')}</SelectItem>
+                                <SelectItem value="5000">{t('5 seconds')}</SelectItem>
+                              </SelectPopup>
+                            </Select>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="border-t pt-3">
+                        <h4 className="text-sm font-medium mb-3">{t('Display Options')}</h4>
+                        <div className="space-y-3">
+                          <div className="space-y-1.5">
+                            <span className="text-sm">{t('Initial Position')}</span>
+                            <Select
+                              value={codexSessionViewer.initialAnchor}
+                              onValueChange={(v) => {
+                                useSettingsStore.getState().setCodexSessionViewerInitialAnchor(v as 'end' | 'start');
+                              }}
+                            >
+                              <SelectTrigger className="w-full" size="sm">
+                                <SelectValue>
+                                  {codexSessionViewer.initialAnchor === 'end' ? t('Scroll to Bottom') : t('Scroll to Top')}
+                                </SelectValue>
+                              </SelectTrigger>
+                              <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                                <SelectItem value="end">{t('Scroll to Bottom')}</SelectItem>
+                                <SelectItem value="start">{t('Scroll to Top')}</SelectItem>
+                              </SelectPopup>
+                            </Select>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm">{t('Jump Buttons')}</span>
+                            <Switch
+                              checked={codexSessionViewer.showJumpButtons}
+                              onCheckedChange={(checked) => {
+                                useSettingsStore.getState().setCodexSessionViewerShowJumpButtons(checked);
+                              }}
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="border-t pt-3">
+                        <h4 className="text-sm font-medium mb-3">{t('Window Settings')}</h4>
+                        <div className="space-y-3">
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">{t('Window Height')}</span>
+                              <span className="text-xs text-muted-foreground">{codexSessionViewer.modalHeight}vh</span>
+                            </div>
+                            <Slider
+                              value={[codexSessionViewer.modalHeight]}
+                              onValueChange={(vals) => {
+                                useSettingsStore.getState().setCodexSessionViewerModalHeight(
+                                  Array.isArray(vals) ? (vals[0] ?? 80) : vals
+                                );
+                              }}
+                              min={60}
+                              max={95}
+                              step={5}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">{t('Window Width')}</span>
+                              <span className="text-xs text-muted-foreground">{codexSessionViewer.modalWidth}px</span>
+                            </div>
+                            <Slider
+                              value={[codexSessionViewer.modalWidth]}
+                              onValueChange={(vals) => {
+                                useSettingsStore.getState().setCodexSessionViewerModalWidth(
+                                  Array.isArray(vals) ? (vals[0] ?? 1200) : vals
+                                );
+                              }}
+                              min={800}
+                              max={1400}
+                              step={50}
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </PopoverContent>
+                </Popover>
+
+                {/* Font Size Controls */}
+                <div className="my-0.5 flex items-center overflow-hidden rounded-md border border-input bg-background/60">
+                  <button
+                    type="button"
+                    className="flex h-5.5 w-5.5 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() => {
+                      const newSize = Math.max(11, codexSessionViewer.fontSize - 1);
+                      useSettingsStore.getState().setCodexSessionViewerFontSize(newSize);
+                    }}
+                    title={t('Decrease font size')}
+                  >
+                    <Minus className="h-3 w-3" />
+                  </button>
+                  <span className="min-w-[2.35rem] border-x border-input bg-muted/15 px-1 text-center text-[10px] leading-[22px] font-medium tabular-nums text-foreground/75">
+                    {codexSessionViewer.fontSize}
+                  </span>
+                  <button
+                    type="button"
+                    className="flex h-5.5 w-5.5 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    onClick={() => {
+                      const newSize = Math.min(16, codexSessionViewer.fontSize + 1);
+                      useSettingsStore.getState().setCodexSessionViewerFontSize(newSize);
+                    }}
+                    title={t('Increase font size')}
+                  >
+                    <Plus className="h-3 w-3" />
+                  </button>
+                </div>
+
+                {/* Content Filter */}
+                <Select
+                  value={selectedCodexHistoryPath}
+                  onValueChange={handleCodexHistoryChange}
+                >
+                  <SelectTrigger className="h-7 w-56" size="sm">
+                    <SelectValue>{codexHistorySelectLabel}</SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                    <SelectItem value="auto">{t('Current Session')}</SelectItem>
+                    {codexHistoryOptions.map((candidate) => {
+                      const sessionLabel = candidate.sessionId
+                        ? candidate.sessionId.slice(0, 8)
+                        : t('Unknown');
+                      const itemLabel = candidate.updatedAt
+                        ? `${candidate.updatedAt} · ${sessionLabel}`
+                        : sessionLabel;
+                      return (
+                        <SelectItem key={candidate.sessionFilePath} value={candidate.sessionFilePath}>
+                          {itemLabel}
+                        </SelectItem>
+                      );
+                    })}
+                  </SelectPopup>
+                </Select>
+
+                <Select
+                  value={codexSessionViewer.entryFilter}
+                  onValueChange={(v) =>
+                    useSettingsStore.getState().setCodexSessionViewerEntryFilter(v as 'full' | 'explain-reply')
+                  }
+                >
+                  <SelectTrigger className="h-7 w-32" size="sm">
+                    <SelectValue>
+                      {codexSessionViewer.entryFilter === 'full' ? t('Full Display') : t('Compact Mode')}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                    <SelectItem value="full">{t('Full Display')}</SelectItem>
+                    <SelectItem value="explain-reply">{t('Compact Mode')}</SelectItem>
+                  </SelectPopup>
+                </Select>
+              </div>
+            </div>
           </DialogHeader>
-          <DialogPanel className="min-h-0">
-            <div className="flex h-full min-h-0 flex-col gap-3">
+          <div className="min-h-0 flex-1 px-6 pt-1 pb-1">
+            <div className="relative flex h-full min-h-0 flex-col gap-3">
               <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+                <div>
+                  {`${t('Viewing')}: ${
+                    selectedCodexHistoryPath === 'auto' ? t('Current Session') : t('History Session')
+                  }`}
+                </div>
                 <div>{`${t('Session')}: ${codexTranscriptState.sessionId ?? t('Pending match')}`}</div>
                 <div>{`${t('Updated')}: ${codexTranscriptState.updatedAt ?? t('Unknown')}`}</div>
                 <div className="truncate">
                   {`${t('File')}: ${codexTranscriptState.sessionFilePath ?? t('Not resolved yet')}`}
                 </div>
+                {selectedCodexHistoryCandidate && (
+                  <div>{`${t('Entries')}: ${selectedCodexHistoryCandidate.entryCount}`}</div>
+                )}
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border/60 bg-background/60 p-3">
+              <div
+                ref={contentRef}
+                className="min-h-0 flex-1 overflow-y-auto rounded-md border border-border/60 bg-background/60 p-3"
+                style={{ fontSize: `${codexSessionViewer.fontSize}px` }}
+              >
                 {codexTranscriptState.status === 'loading' && (
-                  <div className="text-sm text-muted-foreground">
+                  <div
+                    className="text-muted-foreground"
+                    style={{ fontSize: `${codexSessionViewer.fontSize}px` }}
+                  >
                     {t('Loading Codex session record...')}
                   </div>
                 )}
 
                 {codexTranscriptState.status === 'error' && (
-                  <div className="text-sm text-destructive">
+                  <div
+                    className="text-destructive"
+                    style={{ fontSize: `${codexSessionViewer.fontSize}px` }}
+                  >
                     {codexTranscriptState.error ?? t('Failed to load Codex session record.')}
                   </div>
                 )}
@@ -2550,53 +3120,127 @@ export function AgentTerminal({
                 {codexTranscriptState.status !== 'loading' &&
                   codexTranscriptState.status !== 'error' &&
                   codexTranscriptState.entries.length === 0 && (
-                    <div className="text-sm text-muted-foreground">
+                    <div
+                      className="text-muted-foreground"
+                      style={{ fontSize: `${codexSessionViewer.fontSize}px` }}
+                    >
                       {t('No readable Codex session record was found yet.')}
                     </div>
                   )}
 
-                {codexTranscriptState.entries.length > 0 && (
+                {filteredEntries.length > 0 && (
                   <div className="flex flex-col gap-3">
-                    {codexTranscriptState.entries.map((entry, index) => (
+                    {filteredEntries.map((entry, index) => (
                       <section
                         key={`${entry.kind}-${entry.timestamp ?? 'no-time'}-${index}`}
-                        className={`rounded-md border px-3 py-2 ${CODEX_TRANSCRIPT_CARD_STYLES[entry.kind]}`}
+                        className={`group relative rounded-md border px-3 pt-2 pr-10 pb-8 ${CODEX_TRANSCRIPT_CARD_STYLES[entry.kind]}`}
                       >
                         <div className="mb-2 flex items-center justify-between gap-3">
-                          <div className="text-sm font-medium">
-                            {formatCodexTranscriptEntryTitle(entry, t)}
+                          <div
+                            className="font-medium"
+                            style={{ fontSize: `${codexTranscriptTitleFontSize}px` }}
+                          >
+                            {formatCodexTranscriptEntryTitle(entry, t, locale)}
                           </div>
                           {entry.timestamp && (
-                            <div className="text-[11px] text-muted-foreground">
+                            <div
+                              className="text-muted-foreground"
+                              style={{ fontSize: `${codexTranscriptMetaFontSize}px` }}
+                            >
                               {entry.timestamp}
                             </div>
                           )}
                         </div>
                         {entry.detail && (
-                          <div className="mb-2 text-[11px] text-muted-foreground">
+                          <div
+                            className="mb-2 text-muted-foreground"
+                            style={{ fontSize: `${codexTranscriptMetaFontSize}px` }}
+                          >
                             {entry.detail}
                           </div>
                         )}
-                        <pre className="select-text whitespace-pre-wrap break-words font-mono text-xs leading-5">
+                        <pre
+                          className="select-text whitespace-pre-wrap break-words font-mono"
+                          style={{
+                            fontSize: `${codexSessionViewer.fontSize}px`,
+                            lineHeight: `${codexTranscriptLineHeight}px`,
+                          }}
+                        >
                           {formatCodexTranscriptEntryBody(entry, t)}
                         </pre>
+                        <button
+                          type="button"
+                          onClick={() => copyEntryContent(entry)}
+                          className="absolute right-2 bottom-2 flex h-6 w-6 items-center justify-center rounded border border-border/50 bg-background/80 text-muted-foreground opacity-60 backdrop-blur-sm transition-opacity hover:bg-accent hover:text-accent-foreground hover:opacity-100 focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring group-hover:opacity-100 group-focus-within:opacity-100"
+                          title={t('Copy')}
+                          aria-label={t('Copy')}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
                       </section>
                     ))}
                   </div>
                 )}
               </div>
             </div>
-          </DialogPanel>
-          <DialogFooter variant="bare" className="flex-row justify-between">
-            <Button variant="outline" onClick={() => void loadCodexTranscript()}>
+          </div>
+          <DialogFooter variant="bare" className="flex-row items-center">
+            {/* Left: Reload */}
+            <Button variant="outline" size="sm" onClick={() => void handleReloadCodexTranscript()}>
               {t('Reload')}
             </Button>
-            <div className="flex items-center gap-2">
-              <Button variant="outline" onClick={copyCodexTranscript}>
+
+            {/* Center: Navigation + Copy */}
+            <div className="flex flex-1 items-center justify-center gap-2">
+              {codexSessionViewer.showJumpButtons && (
+                <div className="flex items-center overflow-hidden rounded-md border border-input divide-x divide-input">
+                  <button
+                    type="button"
+                    onClick={handleScrollToTop}
+                    title={t('Scroll to top')}
+                    className="flex h-7 items-center gap-1 px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <ArrowUp className="h-3 w-3" />
+                    <span>{t('Scroll to top')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      useSettingsStore.getState().setCodexSessionViewerAutoRefresh(
+                        !codexSessionViewer.autoRefresh
+                      );
+                    }}
+                    title={t('Toggle auto refresh')}
+                    aria-pressed={codexSessionViewer.autoRefresh}
+                    className={`flex h-7 items-center gap-1 px-2.5 text-xs transition-colors ${
+                      codexSessionViewer.autoRefresh
+                        ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                        : 'text-muted-foreground hover:bg-accent hover:text-foreground'
+                    }`}
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 ${codexSessionViewer.autoRefresh ? 'animate-spin' : ''}`}
+                    />
+                    <span>{t('Auto Refresh')}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleScrollToBottomCodex}
+                    title={t('Scroll to bottom')}
+                    className="flex h-7 items-center gap-1 px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  >
+                    <ArrowDown className="h-3 w-3" />
+                    <span>{t('Scroll to bottom')}</span>
+                  </button>
+                </div>
+              )}
+              <Button variant="outline" size="sm" onClick={copyCodexTranscript}>
                 {t('Copy')}
               </Button>
-              <Button onClick={() => setIsTranscriptOpen(false)}>{t('Close')}</Button>
             </div>
+
+            {/* Right: Close */}
+            <Button size="sm" onClick={() => setIsTranscriptOpen(false)}>{t('Close')}</Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
