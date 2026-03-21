@@ -6,7 +6,7 @@ import {
   TerminalSearchBar,
   type TerminalSearchBarRef,
 } from '@/components/terminal/TerminalSearchBar';
-import { Button } from '@/components/ui/button';
+import { Button, buttonVariants } from '@/components/ui/button';
 import {
   Dialog,
   DialogFooter,
@@ -24,12 +24,12 @@ import {
 } from '@/components/ui/select';
 import { Slider } from '@/components/ui/slider';
 import { Switch } from '@/components/ui/switch';
+import { toastManager } from '@/components/ui/toast';
 import { useFileDrop } from '@/hooks/useFileDrop';
 import { useTerminalScrollToBottom } from '@/hooks/useTerminalScrollToBottom';
 import { useXterm } from '@/hooks/useXterm';
 import { useI18n } from '@/i18n';
 import { Z_INDEX } from '@/lib/z-index';
-import { toastManager } from '@/components/ui/toast';
 import { type OutputState, useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -155,6 +155,14 @@ const EMPTY_CODEX_TRANSCRIPT_STATE: CodexTranscriptState = {
   updatedAt: null,
 };
 
+const CODEX_TRANSCRIPT_OSC_REGEX =
+  // biome-ignore lint/complexity/useRegexLiterals: ANSI escape sequences require constructor for clarity
+  new RegExp('\x1b][^\x07]*(?:\x07|\x1b\\\\)', 'g');
+// biome-ignore lint/complexity/useRegexLiterals: ANSI escape sequences require constructor for clarity
+const CODEX_TRANSCRIPT_CSI_REGEX = new RegExp('\x1b[[0-?]*[ -/]*[@-~]', 'g');
+// biome-ignore lint/complexity/useRegexLiterals: ANSI escape sequences require constructor for clarity
+const CODEX_TRANSCRIPT_ESC_REGEX = new RegExp('\x1b[@-_]', 'g');
+
 const CODEX_TRANSCRIPT_CARD_STYLES: Record<CodexTranscriptEntryKind, string> = {
   user: 'border-blue-500/25 bg-blue-500/5',
   assistant: 'border-emerald-500/25 bg-emerald-500/5',
@@ -166,9 +174,9 @@ const CODEX_TRANSCRIPT_CARD_STYLES: Record<CodexTranscriptEntryKind, string> = {
 
 function stripAnsiForCodexTranscript(text: string): string {
   return text
-    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, ' ')
-    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
-    .replace(/\u001b[@-_]/g, ' ');
+    .replace(CODEX_TRANSCRIPT_OSC_REGEX, ' ')
+    .replace(CODEX_TRANSCRIPT_CSI_REGEX, ' ')
+    .replace(CODEX_TRANSCRIPT_ESC_REGEX, ' ');
 }
 
 function normalizeCodexTranscriptText(text: string): string {
@@ -328,8 +336,7 @@ function formatCodexWebSearchActionBody(action: unknown): string {
   }
 
   const actionType = 'type' in action && typeof action.type === 'string' ? action.type : 'other';
-  const query =
-    'query' in action && typeof action.query === 'string' ? action.query.trim() : '';
+  const query = 'query' in action && typeof action.query === 'string' ? action.query.trim() : '';
   const queries =
     'queries' in action && Array.isArray(action.queries)
       ? action.queries
@@ -363,7 +370,8 @@ function formatCodexImageGenerationBody(payload: Record<string, unknown>): strin
     typeof payload.revised_prompt === 'string'
       ? normalizeCodexTranscriptText(payload.revised_prompt)
       : '';
-  const result = typeof payload.result === 'string' ? normalizeCodexTranscriptText(payload.result) : '';
+  const result =
+    typeof payload.result === 'string' ? normalizeCodexTranscriptText(payload.result) : '';
 
   const sections: string[] = [];
   if (revisedPrompt) {
@@ -482,9 +490,7 @@ function appendCodexTranscriptEntriesFromResponseItem(
         kind: 'tool-call',
         title: 'Tool Call · web_search',
         body,
-        detail: buildCodexTranscriptDetail([
-          ['status', payload.status],
-        ]),
+        detail: buildCodexTranscriptDetail([['status', payload.status]]),
         timestamp,
       });
       break;
@@ -593,10 +599,7 @@ function formatCodexTimestamp(timestamp?: string): string | undefined {
 }
 
 function normalizePathForComparison(path?: string): string {
-  let normalized = (path ?? '')
-    .replace(/\\/g, '/')
-    .replace(/\/+/g, '/')
-    .replace(/\/$/, '');
+  let normalized = (path ?? '').replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '');
 
   if (window.electronAPI.env.platform === 'win32') {
     normalized = normalized.toLowerCase();
@@ -783,15 +786,9 @@ function scoreCodexPromptObservationForTranscript(
       let score = 0;
       if (body === normalizedObservation) {
         score = recencyWeight + 60;
-      } else if (
-        body.startsWith(normalizedObservation) ||
-        normalizedObservation.startsWith(body)
-      ) {
+      } else if (body.startsWith(normalizedObservation) || normalizedObservation.startsWith(body)) {
         score = recencyWeight + 40;
-      } else if (
-        body.includes(normalizedObservation) ||
-        normalizedObservation.includes(body)
-      ) {
+      } else if (body.includes(normalizedObservation) || normalizedObservation.includes(body)) {
         score = recencyWeight + 20;
       }
 
@@ -822,9 +819,7 @@ function extractRecentCodexHistoryRecords(
         continue;
       }
       records.push({ sessionId: record.session_id, ts: record.ts });
-    } catch {
-      continue;
-    }
+    } catch {}
   }
 
   return records;
@@ -845,10 +840,7 @@ async function readLatestCodexHistoryTimestamp(historyPath: string): Promise<num
   }
 }
 
-function buildCodexSessionDayPaths(
-  codexHome: string,
-  timestampSeconds?: number
-): string[] {
+function buildCodexSessionDayPaths(codexHome: string, timestampSeconds?: number): string[] {
   const baseDate = timestampSeconds ? new Date(timestampSeconds * 1000) : new Date();
   const paths: string[] = [];
 
@@ -896,16 +888,12 @@ function extractCodexSessionMetaPayload(
 
   return {
     id: typeof metaCandidate.id === 'string' ? metaCandidate.id : undefined,
-    timestamp:
-      typeof metaCandidate.timestamp === 'string' ? metaCandidate.timestamp : undefined,
+    timestamp: typeof metaCandidate.timestamp === 'string' ? metaCandidate.timestamp : undefined,
     cwd: typeof metaCandidate.cwd === 'string' ? metaCandidate.cwd : undefined,
   };
 }
 
-function parseCodexTranscriptDocument(
-  content: string,
-  filePath: string
-): CodexTranscriptDocument {
+function parseCodexTranscriptDocument(content: string, filePath: string): CodexTranscriptDocument {
   const entries: CodexTranscriptEntry[] = [];
   let meta: CodexSessionMetaPayload | null = null;
   const diagnostics = {
@@ -1018,14 +1006,12 @@ function getCodexTranscriptCandidateTime(
   return candidate.modifiedAt;
 }
 
-function pickBetterCodexTranscriptCandidate(
-  current:
-    | {
-        entry: FileEntry;
-        parsed: CodexTranscriptDocument;
-        candidateTime: number;
-      }
-    | null,
+function _pickBetterCodexTranscriptCandidate(
+  current: {
+    entry: FileEntry;
+    parsed: CodexTranscriptDocument;
+    candidateTime: number;
+  } | null,
   next: {
     entry: FileEntry;
     parsed: CodexTranscriptDocument;
@@ -1053,15 +1039,13 @@ function pickBetterCodexTranscriptCandidate(
 }
 
 function pickBetterCodexTranscriptMatch(
-  current:
-    | {
-        entry: FileEntry;
-        parsed: CodexTranscriptDocument;
-        candidateTime: number;
-        promptScore: number;
-        observedSessionIdMatch: boolean;
-      }
-    | null,
+  current: {
+    entry: FileEntry;
+    parsed: CodexTranscriptDocument;
+    candidateTime: number;
+    promptScore: number;
+    observedSessionIdMatch: boolean;
+  } | null,
   next: {
     entry: FileEntry;
     parsed: CodexTranscriptDocument;
@@ -1218,8 +1202,8 @@ export function AgentTerminal({
   const [selectedCodexHistoryPath, setSelectedCodexHistoryPath] = useState<string>('auto');
   const contentRef = useRef<HTMLDivElement>(null);
   const shouldApplyCodexInitialScrollRef = useRef(false);
-  const [showCodexScrollToTop, setShowCodexScrollToTop] = useState(false);
-  const [showCodexScrollToBottom, setShowCodexScrollToBottom] = useState(false);
+  const [_showCodexScrollToTop, setShowCodexScrollToTop] = useState(false);
+  const [_showCodexScrollToBottom, setShowCodexScrollToBottom] = useState(false);
 
   // Filter entries based on settings
   const filteredEntries = useMemo(() => {
@@ -1267,8 +1251,7 @@ export function AgentTerminal({
     setCodexTranscriptState(EMPTY_CODEX_TRANSCRIPT_STATE);
 
     const baselinePromise = (async () => {
-      const homeDir =
-        window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
+      const homeDir = window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
       const separator = window.electronAPI.env.platform === 'win32' ? '\\' : '/';
       const historyPath = joinCodexPath(separator, homeDir, '.codex', 'history.jsonl');
       return readLatestCodexHistoryTimestamp(historyPath);
@@ -1387,9 +1370,7 @@ export function AgentTerminal({
           cwd: parsed.meta?.cwd ?? null,
           entryCount: parsed.entries.length,
         });
-      } catch {
-        continue;
-      }
+      } catch {}
     }
 
     nextCandidates.sort((left, right) => right.candidateTime - left.candidateTime);
@@ -1419,27 +1400,27 @@ export function AgentTerminal({
       }
 
       try {
-      const homeDir =
-        window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
-      const separator = window.electronAPI.env.platform === 'win32' ? '\\' : '/';
-      const codexHome = joinCodexPath(separator, homeDir, '.codex');
-      const sessionsRoot = joinCodexPath(separator, codexHome, 'sessions');
-      const historyPath = joinCodexPath(separator, codexHome, 'history.jsonl');
-      const sessionAnchorTime =
-        startTimeRef.current ?? codexSessionStartedAtRef.current ?? Date.now();
-      const historyBaselineTs =
-        codexHistoryBaselineTsRef.current ??
-        (codexHistoryBaselinePromiseRef.current
-          ? await codexHistoryBaselinePromiseRef.current
-          : null);
-      if (requestId !== codexTranscriptRequestIdRef.current) {
-        return null;
-      }
-      const normalizedCwd = normalizePathForComparison(cwd);
-      let boundSession = boundCodexSessionRef.current;
-      const observedSessionId = codexObservedSessionIdRef.current;
-      const promptObservations = codexPromptObservationsRef.current;
-      let invalidBoundSessionPath: string | null = null;
+        const homeDir =
+          window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
+        const separator = window.electronAPI.env.platform === 'win32' ? '\\' : '/';
+        const codexHome = joinCodexPath(separator, homeDir, '.codex');
+        const _sessionsRoot = joinCodexPath(separator, codexHome, 'sessions');
+        const historyPath = joinCodexPath(separator, codexHome, 'history.jsonl');
+        const sessionAnchorTime =
+          startTimeRef.current ?? codexSessionStartedAtRef.current ?? Date.now();
+        const historyBaselineTs =
+          codexHistoryBaselineTsRef.current ??
+          (codexHistoryBaselinePromiseRef.current
+            ? await codexHistoryBaselinePromiseRef.current
+            : null);
+        if (requestId !== codexTranscriptRequestIdRef.current) {
+          return null;
+        }
+        const normalizedCwd = normalizePathForComparison(cwd);
+        let boundSession = boundCodexSessionRef.current;
+        const observedSessionId = codexObservedSessionIdRef.current;
+        const promptObservations = codexPromptObservationsRef.current;
+        let invalidBoundSessionPath: string | null = null;
         const commitTranscriptState = (nextState: CodexTranscriptState): CodexTranscriptState => {
           if (requestId === codexTranscriptRequestIdRef.current) {
             setCodexTranscriptState(nextState);
@@ -1471,16 +1452,17 @@ export function AgentTerminal({
             buildCodexTranscriptStateFromParsed(
               parsed,
               sessionFilePath,
-              parsed.meta?.id ?? sessionFilePath.split(/[\\/]/).pop()?.replace(/\.jsonl$/, '') ?? null
+              parsed.meta?.id ??
+                sessionFilePath
+                  .split(/[\\/]/)
+                  .pop()
+                  ?.replace(/\.jsonl$/, '') ??
+                null
             )
           );
         }
 
-        if (
-          boundSession &&
-          observedSessionId &&
-          boundSession.sessionId !== observedSessionId
-        ) {
+        if (boundSession && observedSessionId && boundSession.sessionId !== observedSessionId) {
           invalidBoundSessionPath = boundSession.sessionFilePath;
           boundCodexSessionRef.current = null;
           boundSession = null;
@@ -1496,7 +1478,9 @@ export function AgentTerminal({
             const parsed = parseCodexTranscriptDocument(content, boundSession.sessionFilePath);
             const parsedCwd = normalizePathForComparison(parsed.meta?.cwd);
             if (normalizedCwd && parsedCwd && parsedCwd !== normalizedCwd) {
-              throw new Error(t('Bound Codex session record does not match the current workspace.'));
+              throw new Error(
+                t('Bound Codex session record does not match the current workspace.')
+              );
             }
             if (isCodexTranscriptInvalid(parsed)) {
               throw new Error(t('Failed to load Codex session record.'));
@@ -1566,22 +1550,17 @@ export function AgentTerminal({
           return commitTranscriptState(buildEmptyTranscriptState());
         }
 
-        if (
-          shouldAvoidOlderTranscriptFallback &&
-          recentHistoryRecordsAfterBaseline.length === 0
-        ) {
+        if (shouldAvoidOlderTranscriptFallback && recentHistoryRecordsAfterBaseline.length === 0) {
           return commitTranscriptState(buildEmptyTranscriptState());
         }
 
-        let exactMatch:
-          | {
-              entry: FileEntry;
-              parsed: CodexTranscriptDocument;
-              candidateTime: number;
-              promptScore: number;
-              observedSessionIdMatch: boolean;
-            }
-          | null = null;
+        let exactMatch: {
+          entry: FileEntry;
+          parsed: CodexTranscriptDocument;
+          candidateTime: number;
+          promptScore: number;
+          observedSessionIdMatch: boolean;
+        } | null = null;
 
         for (const historyRecord of prioritizedHistoryRecords) {
           const dayPaths = buildCodexSessionDayPaths(codexHome, historyRecord.ts);
@@ -1634,9 +1613,7 @@ export function AgentTerminal({
               },
               sessionAnchorTime
             );
-          } catch {
-            continue;
-          }
+          } catch {}
         }
 
         if (exactMatch) {
@@ -1662,33 +1639,27 @@ export function AgentTerminal({
           return commitTranscriptState(buildEmptyTranscriptState());
         }
 
-        let preferredFallbackMatch:
-          | {
-              entry: FileEntry;
-              parsed: CodexTranscriptDocument;
-              candidateTime: number;
-              promptScore: number;
-              observedSessionIdMatch: boolean;
-            }
-          | null = null;
-        let recentFallbackMatch:
-          | {
-              entry: FileEntry;
-              parsed: CodexTranscriptDocument;
-              candidateTime: number;
-              promptScore: number;
-              observedSessionIdMatch: boolean;
-            }
-          | null = null;
-        let fallbackMatch:
-          | {
-              entry: FileEntry;
-              parsed: CodexTranscriptDocument;
-              candidateTime: number;
-              promptScore: number;
-              observedSessionIdMatch: boolean;
-            }
-          | null = null;
+        let preferredFallbackMatch: {
+          entry: FileEntry;
+          parsed: CodexTranscriptDocument;
+          candidateTime: number;
+          promptScore: number;
+          observedSessionIdMatch: boolean;
+        } | null = null;
+        let recentFallbackMatch: {
+          entry: FileEntry;
+          parsed: CodexTranscriptDocument;
+          candidateTime: number;
+          promptScore: number;
+          observedSessionIdMatch: boolean;
+        } | null = null;
+        let fallbackMatch: {
+          entry: FileEntry;
+          parsed: CodexTranscriptDocument;
+          candidateTime: number;
+          promptScore: number;
+          observedSessionIdMatch: boolean;
+        } | null = null;
 
         for (const candidate of candidates) {
           if (candidate.path === invalidBoundSessionPath) {
@@ -1737,14 +1708,12 @@ export function AgentTerminal({
               nextMatch,
               sessionAnchorTime
             );
-          } catch {
-            continue;
-          }
+          } catch {}
         }
 
         const selectedFallbackMatch = shouldAvoidOlderTranscriptFallback
-          ? preferredFallbackMatch ?? recentFallbackMatch
-          : preferredFallbackMatch ?? recentFallbackMatch ?? fallbackMatch;
+          ? (preferredFallbackMatch ?? recentFallbackMatch)
+          : (preferredFallbackMatch ?? recentFallbackMatch ?? fallbackMatch);
 
         if (!selectedFallbackMatch) {
           return commitTranscriptState(buildEmptyTranscriptState());
@@ -1754,7 +1723,8 @@ export function AgentTerminal({
           selectedFallbackMatch.parsed,
           selectedFallbackMatch.entry.path,
           selectedFallbackMatch.entry.name.replace(/\.jsonl$/, ''),
-          formatCodexTimestamp(new Date(selectedFallbackMatch.entry.modifiedAt).toISOString()) ?? null
+          formatCodexTimestamp(new Date(selectedFallbackMatch.entry.modifiedAt).toISOString()) ??
+            null
         );
         boundCodexSessionRef.current = {
           sessionId:
@@ -1823,7 +1793,7 @@ export function AgentTerminal({
         candidateTime: codexTranscriptState.updatedAt
           ? Date.parse(codexTranscriptState.updatedAt)
           : Number.MAX_SAFE_INTEGER,
-        cwd,
+        cwd: cwd ?? null,
         entryCount: codexTranscriptState.entries.length,
       });
     }
@@ -1834,7 +1804,8 @@ export function AgentTerminal({
     () =>
       selectedCodexHistoryPath === 'auto'
         ? null
-        : codexHistoryOptions.find((item) => item.sessionFilePath === selectedCodexHistoryPath) ?? null,
+        : (codexHistoryOptions.find((item) => item.sessionFilePath === selectedCodexHistoryPath) ??
+          null),
     [codexHistoryOptions, selectedCodexHistoryPath]
   );
 
@@ -1870,11 +1841,12 @@ export function AgentTerminal({
   }, []);
 
   const handleCodexHistoryChange = useCallback(
-    (value: string) => {
+    (value: string | null) => {
+      const nextValue = value ?? 'auto';
       shouldApplyCodexInitialScrollRef.current = true;
-      setSelectedCodexHistoryPath(value);
+      setSelectedCodexHistoryPath(nextValue);
       void loadCodexTranscript({
-        sessionFilePath: value === 'auto' ? undefined : value,
+        sessionFilePath: nextValue === 'auto' ? undefined : nextValue,
       });
     },
     [loadCodexTranscript]
@@ -1965,7 +1937,7 @@ export function AgentTerminal({
     handleScroll(); // Initial check
 
     return () => container.removeEventListener('scroll', handleScroll);
-  }, [codexSessionViewer.showJumpButtons, filteredEntries]);
+  }, [codexSessionViewer.showJumpButtons]);
 
   const handleScrollToTop = useCallback(() => {
     useSettingsStore.getState().setCodexSessionViewerAutoRefresh(false);
@@ -2796,10 +2768,9 @@ export function AgentTerminal({
       // to PTY directly. Avoids xterm's terminal.paste() which converts
       // \n→\r and breaks multi-image payloads.
       if (isCodexAgent && content.trim()) {
-        codexPromptObservationsRef.current = [
-          ...codexPromptObservationsRef.current,
-          message,
-        ].slice(-MAX_CODEX_PROMPT_OBSERVATIONS);
+        codexPromptObservationsRef.current = [...codexPromptObservationsRef.current, message].slice(
+          -MAX_CODEX_PROMPT_OBSERVATIONS
+        );
       }
 
       const hasInternalNewlines = message.includes('\n');
@@ -2873,10 +2844,16 @@ export function AgentTerminal({
               <div className="flex items-center gap-2">
                 {/* More Settings Popover */}
                 <Popover>
-                  <PopoverTrigger asChild>
-                    <Button size="sm" variant="ghost" className="h-7 w-7 p-0" title={t('More settings')}>
-                      <Settings className="h-3 w-3" />
-                    </Button>
+                  <PopoverTrigger
+                    className={buttonVariants({
+                      size: 'sm',
+                      variant: 'ghost',
+                      className: 'h-7 w-7 p-0',
+                    })}
+                    title={t('More settings')}
+                  >
+                    <span className="sr-only">{t('More settings')}</span>
+                    <Settings className="h-3 w-3" />
                   </PopoverTrigger>
                   <PopoverContent
                     className="w-80"
@@ -2893,7 +2870,9 @@ export function AgentTerminal({
                             <Switch
                               checked={codexSessionViewer.autoRefresh}
                               onCheckedChange={(checked) => {
-                                useSettingsStore.getState().setCodexSessionViewerAutoRefresh(checked);
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerAutoRefresh(checked);
                               }}
                             />
                           </div>
@@ -2902,7 +2881,9 @@ export function AgentTerminal({
                             <Select
                               value={String(codexSessionViewer.autoRefreshIntervalMs)}
                               onValueChange={(v) => {
-                                useSettingsStore.getState().setCodexSessionViewerAutoRefreshInterval(Number(v));
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerAutoRefreshInterval(Number(v));
                               }}
                               disabled={!codexSessionViewer.autoRefresh}
                             >
@@ -2915,7 +2896,10 @@ export function AgentTerminal({
                                       : t('5 seconds')}
                                 </SelectValue>
                               </SelectTrigger>
-                              <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                              <SelectPopup
+                                zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                                alignItemWithTrigger={false}
+                              >
                                 <SelectItem value="2000">{t('2 seconds')}</SelectItem>
                                 <SelectItem value="3000">{t('3 seconds')}</SelectItem>
                                 <SelectItem value="5000">{t('5 seconds')}</SelectItem>
@@ -2933,15 +2917,22 @@ export function AgentTerminal({
                             <Select
                               value={codexSessionViewer.initialAnchor}
                               onValueChange={(v) => {
-                                useSettingsStore.getState().setCodexSessionViewerInitialAnchor(v as 'end' | 'start');
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerInitialAnchor(v as 'end' | 'start');
                               }}
                             >
                               <SelectTrigger className="w-full" size="sm">
                                 <SelectValue>
-                                  {codexSessionViewer.initialAnchor === 'end' ? t('Scroll to Bottom') : t('Scroll to Top')}
+                                  {codexSessionViewer.initialAnchor === 'end'
+                                    ? t('Scroll to Bottom')
+                                    : t('Scroll to Top')}
                                 </SelectValue>
                               </SelectTrigger>
-                              <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                              <SelectPopup
+                                zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                                alignItemWithTrigger={false}
+                              >
                                 <SelectItem value="end">{t('Scroll to Bottom')}</SelectItem>
                                 <SelectItem value="start">{t('Scroll to Top')}</SelectItem>
                               </SelectPopup>
@@ -2952,7 +2943,9 @@ export function AgentTerminal({
                             <Switch
                               checked={codexSessionViewer.showJumpButtons}
                               onCheckedChange={(checked) => {
-                                useSettingsStore.getState().setCodexSessionViewerShowJumpButtons(checked);
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerShowJumpButtons(checked);
                               }}
                             />
                           </div>
@@ -2965,14 +2958,18 @@ export function AgentTerminal({
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
                               <span className="text-sm">{t('Window Height')}</span>
-                              <span className="text-xs text-muted-foreground">{codexSessionViewer.modalHeight}vh</span>
+                              <span className="text-xs text-muted-foreground">
+                                {codexSessionViewer.modalHeight}vh
+                              </span>
                             </div>
                             <Slider
                               value={[codexSessionViewer.modalHeight]}
                               onValueChange={(vals) => {
-                                useSettingsStore.getState().setCodexSessionViewerModalHeight(
-                                  Array.isArray(vals) ? (vals[0] ?? 80) : vals
-                                );
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerModalHeight(
+                                    Array.isArray(vals) ? (vals[0] ?? 80) : vals
+                                  );
                               }}
                               min={60}
                               max={95}
@@ -2982,14 +2979,18 @@ export function AgentTerminal({
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between">
                               <span className="text-sm">{t('Window Width')}</span>
-                              <span className="text-xs text-muted-foreground">{codexSessionViewer.modalWidth}px</span>
+                              <span className="text-xs text-muted-foreground">
+                                {codexSessionViewer.modalWidth}px
+                              </span>
                             </div>
                             <Slider
                               value={[codexSessionViewer.modalWidth]}
                               onValueChange={(vals) => {
-                                useSettingsStore.getState().setCodexSessionViewerModalWidth(
-                                  Array.isArray(vals) ? (vals[0] ?? 1200) : vals
-                                );
+                                useSettingsStore
+                                  .getState()
+                                  .setCodexSessionViewerModalWidth(
+                                    Array.isArray(vals) ? (vals[0] ?? 1200) : vals
+                                  );
                               }}
                               min={800}
                               max={1400}
@@ -3032,10 +3033,7 @@ export function AgentTerminal({
                 </div>
 
                 {/* Content Filter */}
-                <Select
-                  value={selectedCodexHistoryPath}
-                  onValueChange={handleCodexHistoryChange}
-                >
+                <Select value={selectedCodexHistoryPath} onValueChange={handleCodexHistoryChange}>
                   <SelectTrigger className="h-7 w-56" size="sm">
                     <SelectValue>{codexHistorySelectLabel}</SelectValue>
                   </SelectTrigger>
@@ -3049,7 +3047,10 @@ export function AgentTerminal({
                         ? `${candidate.updatedAt} · ${sessionLabel}`
                         : sessionLabel;
                       return (
-                        <SelectItem key={candidate.sessionFilePath} value={candidate.sessionFilePath}>
+                        <SelectItem
+                          key={candidate.sessionFilePath}
+                          value={candidate.sessionFilePath}
+                        >
                           {itemLabel}
                         </SelectItem>
                       );
@@ -3060,12 +3061,16 @@ export function AgentTerminal({
                 <Select
                   value={codexSessionViewer.entryFilter}
                   onValueChange={(v) =>
-                    useSettingsStore.getState().setCodexSessionViewerEntryFilter(v as 'full' | 'explain-reply')
+                    useSettingsStore
+                      .getState()
+                      .setCodexSessionViewerEntryFilter(v as 'full' | 'explain-reply')
                   }
                 >
                   <SelectTrigger className="h-7 w-32" size="sm">
                     <SelectValue>
-                      {codexSessionViewer.entryFilter === 'full' ? t('Full Display') : t('Compact Mode')}
+                      {codexSessionViewer.entryFilter === 'full'
+                        ? t('Full Display')
+                        : t('Compact Mode')}
                     </SelectValue>
                   </SelectTrigger>
                   <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
@@ -3081,7 +3086,9 @@ export function AgentTerminal({
               <div className="rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
                 <div>
                   {`${t('Viewing')}: ${
-                    selectedCodexHistoryPath === 'auto' ? t('Current Session') : t('History Session')
+                    selectedCodexHistoryPath === 'auto'
+                      ? t('Current Session')
+                      : t('History Session')
                   }`}
                 </div>
                 <div>{`${t('Session')}: ${codexTranscriptState.sessionId ?? t('Pending match')}`}</div>
@@ -3206,9 +3213,9 @@ export function AgentTerminal({
                   <button
                     type="button"
                     onClick={() => {
-                      useSettingsStore.getState().setCodexSessionViewerAutoRefresh(
-                        !codexSessionViewer.autoRefresh
-                      );
+                      useSettingsStore
+                        .getState()
+                        .setCodexSessionViewerAutoRefresh(!codexSessionViewer.autoRefresh);
                     }}
                     title={t('Toggle auto refresh')}
                     aria-pressed={codexSessionViewer.autoRefresh}
@@ -3240,7 +3247,9 @@ export function AgentTerminal({
             </div>
 
             {/* Right: Close */}
-            <Button size="sm" onClick={() => setIsTranscriptOpen(false)}>{t('Close')}</Button>
+            <Button size="sm" onClick={() => setIsTranscriptOpen(false)}>
+              {t('Close')}
+            </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
