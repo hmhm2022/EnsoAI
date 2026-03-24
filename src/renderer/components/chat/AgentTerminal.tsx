@@ -19,6 +19,7 @@ import {
   Select,
   SelectItem,
   SelectPopup,
+  SelectSeparator,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
@@ -83,6 +84,32 @@ const MAX_CODEX_OUTPUT_PROBE_CHARS = 4000;
 const MAX_CODEX_HISTORY_LINES = 40;
 const MAX_CODEX_PROMPT_OBSERVATIONS = 4;
 const MAX_CODEX_HISTORY_DAY_OFFSETS = [-1, 0, 1] as const;
+const MAX_CODEX_VISIBLE_HISTORY_CANDIDATES = 10;
+const CODEX_HISTORY_PANEL_WIDTH_CLASS = 'w-[38rem]';
+const CODEX_HISTORY_SECTION_HEADER_CLASS = 'border-b border-border/60 px-3 py-2';
+const CODEX_HISTORY_SELECT_ITEM_CLASS =
+  'grid-cols-[0_minmax(0,1fr)] gap-0 rounded-md border px-3 py-2 ps-3 pe-3 data-highlighted:border-border/60 data-highlighted:bg-accent/60 [&_svg]:hidden';
+const CODEX_HISTORY_SELECT_ITEM_IDLE_CLASS =
+  'border-transparent hover:border-border/60 hover:bg-accent/60';
+const CODEX_HISTORY_SELECT_ITEM_SELECTED_CLASS = 'border-primary/35 bg-accent text-foreground';
+const CODEX_HISTORY_TITLE_LINE_PREFIXES = [
+  '# AGENTS.md instructions',
+  '# Context from my IDE setup:',
+  '## Code review guidelines:',
+  '<environment_context>',
+  '<permissions instructions>',
+  '<turn_aborted>',
+  '<collaboration_mode>',
+  '<skills_instructions>',
+  '<INSTRUCTIONS>',
+] as const;
+const CODEX_HISTORY_TITLE_NOISE_PATTERNS = [
+  /^review the current code changes\b/i,
+  /^you are acting as a reviewer\b/i,
+  /^please review\b/i,
+  /^下面开始代码审查/,
+  /^请审查/,
+] as const;
 
 type CodexTranscriptEntryKind =
   | 'user'
@@ -143,6 +170,7 @@ interface CodexHistoryCandidate {
   candidateTime: number;
   cwd: string | null;
   entryCount: number;
+  sessionTitle?: string;
 }
 
 const EMPTY_CODEX_TRANSCRIPT_STATE: CodexTranscriptState = {
@@ -637,6 +665,56 @@ function isCodexScaffoldMessage(text: string): boolean {
     trimmed.startsWith('<skills_instructions>') ||
     trimmed.startsWith('<INSTRUCTIONS>')
   );
+}
+
+function extractCodexHistoryTitle(text: string): string | null {
+  const normalized = normalizeCodexTranscriptText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const cleanedLines = normalized
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter(
+      (line) =>
+        !CODEX_HISTORY_TITLE_LINE_PREFIXES.some((prefix) => line.startsWith(prefix)) &&
+        !line.startsWith('<image name=')
+    );
+
+  if (cleanedLines.length === 0) {
+    return null;
+  }
+
+  const collapsed = cleanedLines.join(' ').replace(/\s+/g, ' ').trim();
+  if (!collapsed) {
+    return null;
+  }
+  if (isCodexScaffoldMessage(collapsed)) {
+    return null;
+  }
+  if (CODEX_HISTORY_TITLE_NOISE_PATTERNS.some((pattern) => pattern.test(collapsed))) {
+    return null;
+  }
+  if (collapsed.length < 4 && !/[\u4e00-\u9fff]/.test(collapsed)) {
+    return null;
+  }
+
+  return collapsed.slice(0, 60);
+}
+
+function findCodexHistoryTitle(entries: CodexTranscriptEntry[]): string | undefined {
+  for (const entry of entries) {
+    if (entry.kind !== 'user') {
+      continue;
+    }
+    const title = extractCodexHistoryTitle(entry.body);
+    if (title) {
+      return title;
+    }
+  }
+  return undefined;
 }
 
 function extractCodexMessageText(content: unknown): string {
@@ -1200,6 +1278,13 @@ export function AgentTerminal({
   );
   const [codexHistoryCandidates, setCodexHistoryCandidates] = useState<CodexHistoryCandidate[]>([]);
   const [selectedCodexHistoryPath, setSelectedCodexHistoryPath] = useState<string>('auto');
+  const [currentCodexSessionSnapshot, setCurrentCodexSessionSnapshot] = useState<{
+    updatedAt: string | null;
+    entryCount: number;
+  }>({
+    updatedAt: null,
+    entryCount: 0,
+  });
   const contentRef = useRef<HTMLDivElement>(null);
   const shouldApplyCodexInitialScrollRef = useRef(false);
   const [_showCodexScrollToTop, setShowCodexScrollToTop] = useState(false);
@@ -1219,6 +1304,7 @@ export function AgentTerminal({
   const codexTranscriptTitleFontSize = codexSessionViewer.fontSize + 1;
   const codexTranscriptMetaFontSize = Math.max(11, codexSessionViewer.fontSize - 1);
   const codexTranscriptLineHeight = Math.max(18, Math.round(codexSessionViewer.fontSize * 1.6));
+  const currentCodexSessionLabel = locale === 'zh' ? '当前对话' : 'Current Session';
 
   const isExternallyControlled = externalEnhancedInputOpen !== undefined;
   const enhancedInputOpen = isExternallyControlled
@@ -1249,6 +1335,11 @@ export function AgentTerminal({
     codexOutputProbeBufferRef.current = '';
     codexPromptObservationsRef.current = [];
     setCodexTranscriptState(EMPTY_CODEX_TRANSCRIPT_STATE);
+    setCurrentCodexSessionSnapshot((previous) => ({
+      ...previous,
+      updatedAt: null,
+      entryCount: 0,
+    }));
 
     const baselinePromise = (async () => {
       const homeDir = window.electronAPI.env.HOME || (await window.electronAPI.app.getPath('home'));
@@ -1369,6 +1460,7 @@ export function AgentTerminal({
           candidateTime: getCodexTranscriptCandidateTime(parsed, candidate),
           cwd: parsed.meta?.cwd ?? null,
           entryCount: parsed.entries.length,
+          sessionTitle: findCodexHistoryTitle(parsed.entries),
         });
       } catch {}
     }
@@ -1426,6 +1518,19 @@ export function AgentTerminal({
             setCodexTranscriptState(nextState);
           }
           return nextState;
+        };
+        const commitCurrentSessionState = (
+          nextState: CodexTranscriptState
+        ): CodexTranscriptState => {
+          const committedState = commitTranscriptState(nextState);
+          if (requestId === codexTranscriptRequestIdRef.current) {
+            setCurrentCodexSessionSnapshot((previous) => ({
+              ...previous,
+              updatedAt: committedState.updatedAt,
+              entryCount: committedState.entries.length,
+            }));
+          }
+          return committedState;
         };
         const buildEmptyTranscriptState = (): CodexTranscriptState => ({
           ...EMPTY_CODEX_TRANSCRIPT_STATE,
@@ -1493,7 +1598,7 @@ export function AgentTerminal({
               codexTranscriptState.updatedAt
             );
 
-            return commitTranscriptState(nextState);
+            return commitCurrentSessionState(nextState);
           } catch {
             invalidBoundSessionPath = boundSession.sessionFilePath;
             boundCodexSessionRef.current = null;
@@ -1547,11 +1652,11 @@ export function AgentTerminal({
           !hasCurrentSessionEvidence &&
           recentHistoryRecordsAfterBaseline.length === 0
         ) {
-          return commitTranscriptState(buildEmptyTranscriptState());
+          return commitCurrentSessionState(buildEmptyTranscriptState());
         }
 
         if (shouldAvoidOlderTranscriptFallback && recentHistoryRecordsAfterBaseline.length === 0) {
-          return commitTranscriptState(buildEmptyTranscriptState());
+          return commitCurrentSessionState(buildEmptyTranscriptState());
         }
 
         let exactMatch: {
@@ -1628,7 +1733,7 @@ export function AgentTerminal({
             sessionFilePath: exactMatch.entry.path,
           };
 
-          return commitTranscriptState(nextState);
+          return commitCurrentSessionState(nextState);
         }
 
         const candidates = await listRecentCodexSessionFiles();
@@ -1636,7 +1741,7 @@ export function AgentTerminal({
           return null;
         }
         if (candidates.length === 0) {
-          return commitTranscriptState(buildEmptyTranscriptState());
+          return commitCurrentSessionState(buildEmptyTranscriptState());
         }
 
         let preferredFallbackMatch: {
@@ -1716,7 +1821,7 @@ export function AgentTerminal({
           : (preferredFallbackMatch ?? recentFallbackMatch ?? fallbackMatch);
 
         if (!selectedFallbackMatch) {
-          return commitTranscriptState(buildEmptyTranscriptState());
+          return commitCurrentSessionState(buildEmptyTranscriptState());
         }
 
         const nextState = buildCodexTranscriptStateFromParsed(
@@ -1732,7 +1837,7 @@ export function AgentTerminal({
           sessionFilePath: selectedFallbackMatch.entry.path,
         };
 
-        return commitTranscriptState(nextState);
+        return commitCurrentSessionState(nextState);
       } catch (error) {
         const message =
           error instanceof Error ? error.message : t('Failed to load Codex session record.');
@@ -1795,6 +1900,7 @@ export function AgentTerminal({
           : Number.MAX_SAFE_INTEGER,
         cwd: cwd ?? null,
         entryCount: codexTranscriptState.entries.length,
+        sessionTitle: findCodexHistoryTitle(codexTranscriptState.entries),
       });
     }
     return options;
@@ -1811,18 +1917,32 @@ export function AgentTerminal({
 
   const codexHistorySelectLabel = useMemo(() => {
     if (selectedCodexHistoryPath === 'auto') {
-      return t('Current Session');
+      return currentCodexSessionLabel;
     }
-    if (!selectedCodexHistoryCandidate) {
-      return t('History Session');
+    return (
+      selectedCodexHistoryCandidate?.sessionTitle ??
+      selectedCodexHistoryCandidate?.sessionId?.slice(0, 8) ??
+      t('History Session')
+    );
+  }, [currentCodexSessionLabel, selectedCodexHistoryCandidate, selectedCodexHistoryPath, t]);
+
+  const visibleCodexHistoryCandidates = useMemo(() => {
+    const recent = codexHistoryCandidates.slice(0, MAX_CODEX_VISIBLE_HISTORY_CANDIDATES);
+    if (selectedCodexHistoryPath === 'auto' || !selectedCodexHistoryCandidate) {
+      return recent;
     }
-    const sessionLabel = selectedCodexHistoryCandidate.sessionId
-      ? selectedCodexHistoryCandidate.sessionId.slice(0, 8)
-      : t('History Session');
-    return selectedCodexHistoryCandidate.updatedAt
-      ? `${selectedCodexHistoryCandidate.updatedAt} · ${sessionLabel}`
-      : sessionLabel;
-  }, [selectedCodexHistoryCandidate, selectedCodexHistoryPath, t]);
+    if (
+      recent.some(
+        (candidate) => candidate.sessionFilePath === selectedCodexHistoryCandidate.sessionFilePath
+      )
+    ) {
+      return recent;
+    }
+    return [
+      selectedCodexHistoryCandidate,
+      ...recent.slice(0, Math.max(0, MAX_CODEX_VISIBLE_HISTORY_CANDIDATES - 1)),
+    ];
+  }, [codexHistoryCandidates, selectedCodexHistoryCandidate, selectedCodexHistoryPath]);
 
   const openCodexTranscript = useCallback(() => {
     shouldApplyCodexInitialScrollRef.current = true;
@@ -2837,174 +2957,176 @@ export function AgentTerminal({
           }}
         >
           <DialogHeader>
-            <div className="flex items-center justify-between gap-4 pr-10">
-              <DialogTitle>{t('Codex Session')}</DialogTitle>
+            <div className="flex flex-wrap items-start gap-3 pr-10">
+              <DialogTitle className="shrink-0 pt-0.5">{t('Codex Session')}</DialogTitle>
 
               {/* Toolbar */}
-              <div className="flex items-center gap-2">
+              <div className="flex min-w-0 flex-1 basis-[24rem] flex-wrap items-start gap-2">
                 {/* More Settings Popover */}
-                <Popover>
-                  <PopoverTrigger
-                    className={buttonVariants({
-                      size: 'sm',
-                      variant: 'ghost',
-                      className: 'h-7 w-7 p-0',
-                    })}
-                    title={t('More settings')}
-                  >
-                    <span className="sr-only">{t('More settings')}</span>
-                    <Settings className="h-3 w-3" />
-                  </PopoverTrigger>
-                  <PopoverContent
-                    className="w-80"
-                    side="bottom"
-                    align="end"
-                    zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
-                  >
-                    <div className="space-y-4">
-                      <div>
-                        <h4 className="text-sm font-medium mb-3">{t('Refresh Settings')}</h4>
-                        <div className="space-y-3">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm">{t('Auto Refresh')}</span>
-                            <Switch
-                              checked={codexSessionViewer.autoRefresh}
-                              onCheckedChange={(checked) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerAutoRefresh(checked);
-                              }}
-                            />
-                          </div>
-                          <div className="space-y-1.5">
-                            <span className="text-sm">{t('Refresh Interval')}</span>
-                            <Select
-                              value={String(codexSessionViewer.autoRefreshIntervalMs)}
-                              onValueChange={(v) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerAutoRefreshInterval(Number(v));
-                              }}
-                              disabled={!codexSessionViewer.autoRefresh}
-                            >
-                              <SelectTrigger className="w-full" size="sm">
-                                <SelectValue>
-                                  {codexSessionViewer.autoRefreshIntervalMs === 2000
-                                    ? t('2 seconds')
-                                    : codexSessionViewer.autoRefreshIntervalMs === 3000
-                                      ? t('3 seconds')
-                                      : t('5 seconds')}
-                                </SelectValue>
-                              </SelectTrigger>
-                              <SelectPopup
-                                zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
-                                alignItemWithTrigger={false}
-                              >
-                                <SelectItem value="2000">{t('2 seconds')}</SelectItem>
-                                <SelectItem value="3000">{t('3 seconds')}</SelectItem>
-                                <SelectItem value="5000">{t('5 seconds')}</SelectItem>
-                              </SelectPopup>
-                            </Select>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="border-t pt-3">
-                        <h4 className="text-sm font-medium mb-3">{t('Display Options')}</h4>
-                        <div className="space-y-3">
-                          <div className="space-y-1.5">
-                            <span className="text-sm">{t('Initial Position')}</span>
-                            <Select
-                              value={codexSessionViewer.initialAnchor}
-                              onValueChange={(v) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerInitialAnchor(v as 'end' | 'start');
-                              }}
-                            >
-                              <SelectTrigger className="w-full" size="sm">
-                                <SelectValue>
-                                  {codexSessionViewer.initialAnchor === 'end'
-                                    ? t('Scroll to Bottom')
-                                    : t('Scroll to Top')}
-                                </SelectValue>
-                              </SelectTrigger>
-                              <SelectPopup
-                                zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
-                                alignItemWithTrigger={false}
-                              >
-                                <SelectItem value="end">{t('Scroll to Bottom')}</SelectItem>
-                                <SelectItem value="start">{t('Scroll to Top')}</SelectItem>
-                              </SelectPopup>
-                            </Select>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm">{t('Jump Buttons')}</span>
-                            <Switch
-                              checked={codexSessionViewer.showJumpButtons}
-                              onCheckedChange={(checked) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerShowJumpButtons(checked);
-                              }}
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="border-t pt-3">
-                        <h4 className="text-sm font-medium mb-3">{t('Window Settings')}</h4>
-                        <div className="space-y-3">
-                          <div className="space-y-1.5">
+                <div className="order-3 ml-auto shrink-0">
+                  <Popover>
+                    <PopoverTrigger
+                      className={buttonVariants({
+                        size: 'sm',
+                        variant: 'ghost',
+                        className: 'h-7 w-7 p-0',
+                      })}
+                      title={t('More settings')}
+                    >
+                      <span className="sr-only">{t('More settings')}</span>
+                      <Settings className="h-3 w-3" />
+                    </PopoverTrigger>
+                    <PopoverContent
+                      className="w-80"
+                      side="bottom"
+                      align="end"
+                      zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                    >
+                      <div className="space-y-4">
+                        <div>
+                          <h4 className="text-sm font-medium mb-3">{t('Refresh Settings')}</h4>
+                          <div className="space-y-3">
                             <div className="flex items-center justify-between">
-                              <span className="text-sm">{t('Window Height')}</span>
-                              <span className="text-xs text-muted-foreground">
-                                {codexSessionViewer.modalHeight}vh
-                              </span>
+                              <span className="text-sm">{t('Auto Refresh')}</span>
+                              <Switch
+                                checked={codexSessionViewer.autoRefresh}
+                                onCheckedChange={(checked) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerAutoRefresh(checked);
+                                }}
+                              />
                             </div>
-                            <Slider
-                              value={[codexSessionViewer.modalHeight]}
-                              onValueChange={(vals) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerModalHeight(
-                                    Array.isArray(vals) ? (vals[0] ?? 80) : vals
-                                  );
-                              }}
-                              min={60}
-                              max={95}
-                              step={5}
-                            />
+                            <div className="space-y-1.5">
+                              <span className="text-sm">{t('Refresh Interval')}</span>
+                              <Select
+                                value={String(codexSessionViewer.autoRefreshIntervalMs)}
+                                onValueChange={(v) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerAutoRefreshInterval(Number(v));
+                                }}
+                                disabled={!codexSessionViewer.autoRefresh}
+                              >
+                                <SelectTrigger className="w-full" size="sm">
+                                  <SelectValue>
+                                    {codexSessionViewer.autoRefreshIntervalMs === 2000
+                                      ? t('2 seconds')
+                                      : codexSessionViewer.autoRefreshIntervalMs === 3000
+                                        ? t('3 seconds')
+                                        : t('5 seconds')}
+                                  </SelectValue>
+                                </SelectTrigger>
+                                <SelectPopup
+                                  zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                                  alignItemWithTrigger={false}
+                                >
+                                  <SelectItem value="2000">{t('2 seconds')}</SelectItem>
+                                  <SelectItem value="3000">{t('3 seconds')}</SelectItem>
+                                  <SelectItem value="5000">{t('5 seconds')}</SelectItem>
+                                </SelectPopup>
+                              </Select>
+                            </div>
                           </div>
-                          <div className="space-y-1.5">
-                            <div className="flex items-center justify-between">
-                              <span className="text-sm">{t('Window Width')}</span>
-                              <span className="text-xs text-muted-foreground">
-                                {codexSessionViewer.modalWidth}px
-                              </span>
+                        </div>
+
+                        <div className="border-t pt-3">
+                          <h4 className="text-sm font-medium mb-3">{t('Display Options')}</h4>
+                          <div className="space-y-3">
+                            <div className="space-y-1.5">
+                              <span className="text-sm">{t('Initial Position')}</span>
+                              <Select
+                                value={codexSessionViewer.initialAnchor}
+                                onValueChange={(v) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerInitialAnchor(v as 'end' | 'start');
+                                }}
+                              >
+                                <SelectTrigger className="w-full" size="sm">
+                                  <SelectValue>
+                                    {codexSessionViewer.initialAnchor === 'end'
+                                      ? t('Scroll to Bottom')
+                                      : t('Scroll to Top')}
+                                  </SelectValue>
+                                </SelectTrigger>
+                                <SelectPopup
+                                  zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                                  alignItemWithTrigger={false}
+                                >
+                                  <SelectItem value="end">{t('Scroll to Bottom')}</SelectItem>
+                                  <SelectItem value="start">{t('Scroll to Top')}</SelectItem>
+                                </SelectPopup>
+                              </Select>
                             </div>
-                            <Slider
-                              value={[codexSessionViewer.modalWidth]}
-                              onValueChange={(vals) => {
-                                useSettingsStore
-                                  .getState()
-                                  .setCodexSessionViewerModalWidth(
-                                    Array.isArray(vals) ? (vals[0] ?? 1200) : vals
-                                  );
-                              }}
-                              min={800}
-                              max={1400}
-                              step={50}
-                            />
+                            <div className="flex items-center justify-between">
+                              <span className="text-sm">{t('Jump Buttons')}</span>
+                              <Switch
+                                checked={codexSessionViewer.showJumpButtons}
+                                onCheckedChange={(checked) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerShowJumpButtons(checked);
+                                }}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="border-t pt-3">
+                          <h4 className="text-sm font-medium mb-3">{t('Window Settings')}</h4>
+                          <div className="space-y-3">
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm">{t('Window Height')}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {codexSessionViewer.modalHeight}vh
+                                </span>
+                              </div>
+                              <Slider
+                                value={[codexSessionViewer.modalHeight]}
+                                onValueChange={(vals) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerModalHeight(
+                                      Array.isArray(vals) ? (vals[0] ?? 80) : vals
+                                    );
+                                }}
+                                min={60}
+                                max={95}
+                                step={5}
+                              />
+                            </div>
+                            <div className="space-y-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-sm">{t('Window Width')}</span>
+                                <span className="text-xs text-muted-foreground">
+                                  {codexSessionViewer.modalWidth}px
+                                </span>
+                              </div>
+                              <Slider
+                                value={[codexSessionViewer.modalWidth]}
+                                onValueChange={(vals) => {
+                                  useSettingsStore
+                                    .getState()
+                                    .setCodexSessionViewerModalWidth(
+                                      Array.isArray(vals) ? (vals[0] ?? 1200) : vals
+                                    );
+                                }}
+                                min={800}
+                                max={1400}
+                                step={50}
+                              />
+                            </div>
                           </div>
                         </div>
                       </div>
-                    </div>
-                  </PopoverContent>
-                </Popover>
+                    </PopoverContent>
+                  </Popover>
+                </div>
 
                 {/* Font Size Controls */}
-                <div className="my-0.5 flex items-center overflow-hidden rounded-md border border-input bg-background/60">
+                <div className="order-4 my-0.5 flex shrink-0 items-center overflow-hidden rounded-md border border-input bg-background/60">
                   <button
                     type="button"
                     className="flex h-5.5 w-5.5 shrink-0 items-center justify-center text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
@@ -3033,51 +3155,120 @@ export function AgentTerminal({
                 </div>
 
                 {/* Content Filter */}
-                <Select value={selectedCodexHistoryPath} onValueChange={handleCodexHistoryChange}>
-                  <SelectTrigger className="h-7 w-56" size="sm">
-                    <SelectValue>{codexHistorySelectLabel}</SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
-                    <SelectItem value="auto">{t('Current Session')}</SelectItem>
-                    {codexHistoryOptions.map((candidate) => {
-                      const sessionLabel = candidate.sessionId
-                        ? candidate.sessionId.slice(0, 8)
-                        : t('Unknown');
-                      const itemLabel = candidate.updatedAt
-                        ? `${candidate.updatedAt} · ${sessionLabel}`
-                        : sessionLabel;
-                      return (
-                        <SelectItem
-                          key={candidate.sessionFilePath}
-                          value={candidate.sessionFilePath}
-                        >
-                          {itemLabel}
-                        </SelectItem>
-                      );
-                    })}
-                  </SelectPopup>
-                </Select>
+                <div className="order-1 min-w-0 flex-1 basis-[20rem]">
+                  <Select value={selectedCodexHistoryPath} onValueChange={handleCodexHistoryChange}>
+                    <SelectTrigger
+                      className="h-7 min-w-0 w-full sm:max-w-80"
+                      size="sm"
+                      title={codexHistorySelectLabel}
+                    >
+                      <SelectValue>{codexHistorySelectLabel}</SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup
+                      zIndex={Z_INDEX.DROPDOWN_IN_MODAL}
+                      align="start"
+                      alignItemWithTrigger={false}
+                      sideOffset={8}
+                      className={`${CODEX_HISTORY_PANEL_WIDTH_CLASS} p-0`}
+                    >
+                      <SelectItem
+                        value="auto"
+                        className={`${CODEX_HISTORY_SELECT_ITEM_CLASS} ${
+                          selectedCodexHistoryPath === 'auto'
+                            ? CODEX_HISTORY_SELECT_ITEM_SELECTED_CLASS
+                            : CODEX_HISTORY_SELECT_ITEM_IDLE_CLASS
+                        }`}
+                      >
+                        <div className="min-w-0">
+                          <div
+                            className="truncate text-sm font-medium"
+                            title={currentCodexSessionLabel}
+                          >
+                            {currentCodexSessionLabel}
+                          </div>
+                          <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                            {(currentCodexSessionSnapshot.updatedAt ?? t('Pending match')) +
+                              ' · ' +
+                              t('Entries') +
+                              ': ' +
+                              String(currentCodexSessionSnapshot.entryCount)}
+                          </div>
+                        </div>
+                      </SelectItem>
+                      {(codexHistoryCandidates.length > 0 || selectedCodexHistoryCandidate) && (
+                        <SelectSeparator />
+                      )}
+                      {(codexHistoryCandidates.length > 0 || selectedCodexHistoryCandidate) && (
+                        <div className={CODEX_HISTORY_SECTION_HEADER_CLASS}>
+                          <div className="text-sm font-medium">
+                            {locale === 'zh' ? '最近 10 个会话' : 'Recent 10 Sessions'}
+                          </div>
+                        </div>
+                      )}
+                      {codexHistoryCandidates.length === 0 && (
+                        <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+                          {locale === 'zh' ? '暂无历史会话。' : 'No history sessions.'}
+                        </div>
+                      )}
+                      {visibleCodexHistoryCandidates.map((candidate) => {
+                        const itemTitle =
+                          candidate.sessionTitle ??
+                          candidate.sessionId?.slice(0, 8) ??
+                          t('Unknown');
+                        const itemMeta =
+                          (candidate.updatedAt ?? t('Unknown')) +
+                          ' · ' +
+                          t('Entries') +
+                          ': ' +
+                          String(candidate.entryCount);
+                        const isSelected = selectedCodexHistoryPath === candidate.sessionFilePath;
+                        return (
+                          <SelectItem
+                            key={candidate.sessionFilePath}
+                            value={candidate.sessionFilePath}
+                            className={`${CODEX_HISTORY_SELECT_ITEM_CLASS} ${
+                              isSelected
+                                ? CODEX_HISTORY_SELECT_ITEM_SELECTED_CLASS
+                                : CODEX_HISTORY_SELECT_ITEM_IDLE_CLASS
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-medium" title={itemTitle}>
+                                {itemTitle}
+                              </div>
+                              <div className="mt-0.5 truncate text-[11px] text-muted-foreground">
+                                {itemMeta}
+                              </div>
+                            </div>
+                          </SelectItem>
+                        );
+                      })}
+                    </SelectPopup>
+                  </Select>
+                </div>
 
-                <Select
-                  value={codexSessionViewer.entryFilter}
-                  onValueChange={(v) =>
-                    useSettingsStore
-                      .getState()
-                      .setCodexSessionViewerEntryFilter(v as 'full' | 'explain-reply')
-                  }
-                >
-                  <SelectTrigger className="h-7 w-32" size="sm">
-                    <SelectValue>
-                      {codexSessionViewer.entryFilter === 'full'
-                        ? t('Full Display')
-                        : t('Compact Mode')}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
-                    <SelectItem value="full">{t('Full Display')}</SelectItem>
-                    <SelectItem value="explain-reply">{t('Compact Mode')}</SelectItem>
-                  </SelectPopup>
-                </Select>
+                <div className="order-5 shrink-0">
+                  <Select
+                    value={codexSessionViewer.entryFilter}
+                    onValueChange={(v) =>
+                      useSettingsStore
+                        .getState()
+                        .setCodexSessionViewerEntryFilter(v as 'full' | 'explain-reply')
+                    }
+                  >
+                    <SelectTrigger className="h-7 w-32" size="sm">
+                      <SelectValue>
+                        {codexSessionViewer.entryFilter === 'full'
+                          ? t('Full Display')
+                          : t('Compact Mode')}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup zIndex={Z_INDEX.DROPDOWN_IN_MODAL} alignItemWithTrigger={false}>
+                      <SelectItem value="full">{t('Full Display')}</SelectItem>
+                      <SelectItem value="explain-reply">{t('Compact Mode')}</SelectItem>
+                    </SelectPopup>
+                  </Select>
+                </div>
               </div>
             </div>
           </DialogHeader>
