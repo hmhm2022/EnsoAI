@@ -92,21 +92,25 @@ const CODEX_HISTORY_SELECT_ITEM_CLASS =
 const CODEX_HISTORY_SELECT_ITEM_IDLE_CLASS =
   'border-transparent hover:border-border/60 hover:bg-accent/60';
 const CODEX_HISTORY_SELECT_ITEM_SELECTED_CLASS = 'border-primary/35 bg-accent text-foreground';
-const CODEX_HISTORY_TITLE_LINE_PREFIXES = [
+const CODEX_HISTORY_TITLE_SECTION_PREFIXES = [
   '# AGENTS.md instructions',
   '# Context from my IDE setup:',
   '## Code review guidelines:',
+] as const;
+const CODEX_HISTORY_TITLE_BLOCK_TAGS = [
   '<environment_context>',
   '<permissions instructions>',
   '<turn_aborted>',
   '<collaboration_mode>',
   '<skills_instructions>',
   '<INSTRUCTIONS>',
+  '<user_action>',
 ] as const;
 const CODEX_HISTORY_TITLE_NOISE_PATTERNS = [
   /^review the current code changes\b/i,
   /^you are acting as a reviewer\b/i,
   /^please review\b/i,
+  /^user initiated a review task\b/i,
   /^下面开始代码审查/,
   /^请审查/,
 ] as const;
@@ -657,31 +661,82 @@ function extractCodexSessionIdFromProbe(text: string): string | null {
 function isCodexScaffoldMessage(text: string): boolean {
   const trimmed = text.trim();
   return (
-    trimmed.startsWith('# AGENTS.md instructions') ||
-    trimmed.startsWith('<environment_context>') ||
-    trimmed.startsWith('<permissions instructions>') ||
-    trimmed.startsWith('<turn_aborted>') ||
-    trimmed.startsWith('<collaboration_mode>') ||
-    trimmed.startsWith('<skills_instructions>') ||
-    trimmed.startsWith('<INSTRUCTIONS>')
+    CODEX_HISTORY_TITLE_SECTION_PREFIXES.some((prefix) => trimmed.startsWith(prefix)) ||
+    CODEX_HISTORY_TITLE_BLOCK_TAGS.some((tag) => trimmed.startsWith(tag))
   );
 }
 
-function extractCodexHistoryTitle(text: string): string | null {
+function stripLeadingCodexScaffold(text: string): string {
   const normalized = normalizeCodexTranscriptText(text);
   if (!normalized) {
+    return '';
+  }
+
+  const lines = normalized.split(/\r?\n/);
+  let startIndex = 0;
+
+  while (startIndex < lines.length) {
+    const line = lines[startIndex]?.trim() ?? '';
+    if (!line) {
+      startIndex += 1;
+      continue;
+    }
+
+    if (line.startsWith('<image name=')) {
+      startIndex += 1;
+      continue;
+    }
+
+    const blockTag = CODEX_HISTORY_TITLE_BLOCK_TAGS.find((tag) => line.startsWith(tag));
+    if (blockTag) {
+      const closingTag = blockTag.replace('<', '</');
+      startIndex += 1;
+      while (startIndex < lines.length) {
+        const currentLine = lines[startIndex]?.trim() ?? '';
+        startIndex += 1;
+        if (currentLine.startsWith(closingTag)) {
+          break;
+        }
+      }
+      continue;
+    }
+
+    if (CODEX_HISTORY_TITLE_SECTION_PREFIXES.some((prefix) => line.startsWith(prefix))) {
+      startIndex += 1;
+      while (startIndex < lines.length) {
+        const currentLine = lines[startIndex]?.trim() ?? '';
+        if (!currentLine) {
+          startIndex += 1;
+          break;
+        }
+        if (
+          currentLine.startsWith('<image name=') ||
+          CODEX_HISTORY_TITLE_SECTION_PREFIXES.some((prefix) => currentLine.startsWith(prefix)) ||
+          CODEX_HISTORY_TITLE_BLOCK_TAGS.some((tag) => currentLine.startsWith(tag))
+        ) {
+          break;
+        }
+        startIndex += 1;
+      }
+      continue;
+    }
+
+    break;
+  }
+
+  return lines.slice(startIndex).join('\n').trim();
+}
+
+function extractCodexHistoryTitle(text: string): string | null {
+  const cleanedText = stripLeadingCodexScaffold(text);
+  if (!cleanedText) {
     return null;
   }
 
-  const cleanedLines = normalized
+  const cleanedLines = cleanedText
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter(Boolean)
-    .filter(
-      (line) =>
-        !CODEX_HISTORY_TITLE_LINE_PREFIXES.some((prefix) => line.startsWith(prefix)) &&
-        !line.startsWith('<image name=')
-    );
+    .filter((line) => Boolean(line) && !line.startsWith('<image name='));
 
   if (cleanedLines.length === 0) {
     return null;
@@ -726,10 +781,7 @@ function extractCodexMessageText(content: unknown): string {
     if (!item || typeof item !== 'object' || !('text' in item) || typeof item.text !== 'string') {
       return [];
     }
-    if (isCodexScaffoldMessage(item.text)) {
-      return [];
-    }
-    const normalized = normalizeCodexTranscriptText(item.text);
+    const normalized = stripLeadingCodexScaffold(item.text);
     return normalized ? [normalized] : [];
   });
 
@@ -2000,7 +2052,12 @@ export function AgentTerminal({
 
     const container = contentRef.current;
     if (codexSessionViewer.initialAnchor === 'end') {
-      container.scrollTop = container.scrollHeight;
+      const lastEntry = container.querySelector('section:last-of-type');
+      if (lastEntry instanceof HTMLElement) {
+        lastEntry.scrollIntoView({ block: 'start' });
+      } else {
+        container.scrollTop = container.scrollHeight;
+      }
     } else {
       container.scrollTop = 0;
     }
