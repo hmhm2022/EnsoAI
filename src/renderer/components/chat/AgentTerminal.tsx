@@ -114,6 +114,7 @@ const CODEX_HISTORY_TITLE_NOISE_PATTERNS = [
   /^下面开始代码审查/,
   /^请审查/,
 ] as const;
+const CODEX_ESC_CR_NEWLINE = '\x1b\r';
 
 type CodexTranscriptEntryKind =
   | 'user'
@@ -2554,12 +2555,35 @@ export function AgentTerminal({
     [onTerminalTitleChange]
   );
 
-  // Handle Shift+Enter for newline (Ctrl+J / LF for all agents)
+  // Codex 终端单独处理换行快捷键，其他 agent 继续走原来的 LF。
   // Also detect Enter key press to mark session as activated
   // biome-ignore lint/correctness/useExhaustiveDependencies: terminal is accessed via try-catch for safety and defined after this callback
   const handleCustomKey = useCallback(
     (event: KeyboardEvent, ptyId: string, getCurrentLine?: () => string | null) => {
-      // Handle Shift+Enter for newline - must be before keydown check to block both keydown and keypress
+      // Codex 在嵌入式终端里对裸 LF 和 CSI-u 改造 Enter 兼容不稳。
+      // 这里按 Claude terminal-setup 常用方案发送 ESC+CR，让 Codex 按 Alt+Enter 路径插入换行。
+      if (isCodexAgent && event.type === 'keydown') {
+        if (event.key === 'Enter' && event.shiftKey) {
+          window.electronAPI.terminal.write(ptyId, CODEX_ESC_CR_NEWLINE);
+          return false;
+        }
+        if (event.key === 'Enter' && event.altKey && !event.ctrlKey && !event.metaKey) {
+          window.electronAPI.terminal.write(ptyId, CODEX_ESC_CR_NEWLINE);
+          return false;
+        }
+        if (event.ctrlKey && !event.altKey && !event.metaKey) {
+          if (event.code === 'KeyJ' || event.key === 'j' || event.key === 'J') {
+            window.electronAPI.terminal.write(ptyId, CODEX_ESC_CR_NEWLINE);
+            return false;
+          }
+          if (event.code === 'KeyM' || event.key === 'm' || event.key === 'M') {
+            window.electronAPI.terminal.write(ptyId, CODEX_ESC_CR_NEWLINE);
+            return false;
+          }
+        }
+      }
+
+      // 非 Codex 终端保留原来的 LF 兜底，避免影响其他 agent 的输入习惯。
       if (event.key === 'Enter' && event.shiftKey) {
         if (event.type === 'keydown') {
           window.electronAPI.terminal.write(ptyId, '\x0a');
