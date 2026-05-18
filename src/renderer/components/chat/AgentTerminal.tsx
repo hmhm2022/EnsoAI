@@ -115,6 +115,10 @@ const CODEX_HISTORY_TITLE_NOISE_PATTERNS = [
   /^请审查/,
 ] as const;
 const CODEX_ESC_CR_NEWLINE = '\x1b\r';
+const TERMINAL_PAGE_UP_SEQUENCE = '\x1b[5~';
+const TERMINAL_PAGE_DOWN_SEQUENCE = '\x1b[6~';
+const OPENCODE_WHEEL_STEP_THRESHOLD = 48;
+const OPENCODE_WHEEL_THROTTLE_MS = 90;
 
 type CodexTranscriptEntryKind =
   | 'user'
@@ -1252,6 +1256,7 @@ export function AgentTerminal({
     return agentId;
   }, [agentId]);
   const isCodexAgent = baseAgentId === 'codex';
+  const isOpenCodeAgent = baseAgentId === 'opencode';
   const {
     agentNotificationEnabled,
     agentNotificationDelay,
@@ -1286,6 +1291,8 @@ export function AgentTerminal({
     }
   }, [environment]);
   const outputBufferRef = useRef('');
+  const openCodeWheelDeltaRef = useRef(0);
+  const openCodeWheelLastDispatchRef = useRef(0);
   const startTimeRef = useRef<number | null>(null);
   const hasInitializedRef = useRef(false);
   const hasActivatedRef = useRef(false);
@@ -2923,15 +2930,6 @@ export function AgentTerminal({
     return () => container.removeEventListener('contextmenu', handleContextMenu);
   }, [handleContextMenu, containerRef]);
 
-  // Cleanup idle timer on unmount
-  useEffect(() => {
-    return () => {
-      if (idleTimerRef.current) {
-        clearTimeout(idleTimerRef.current);
-      }
-    };
-  }, []);
-
   // Handle external file drop (from OS file manager, VS Code, etc.)
   const terminalWrapperRef = useFileDrop<HTMLDivElement>({
     cwd,
@@ -2945,6 +2943,66 @@ export function AgentTerminal({
       [write, terminal]
     ),
   });
+
+  useEffect(() => {
+    const wrapper = terminalWrapperRef.current;
+    if (!wrapper || !isOpenCodeAgent || !write) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || event.deltaY === 0) {
+        return;
+      }
+      if (terminal?.hasSelection()) {
+        return;
+      }
+
+      if (
+        openCodeWheelDeltaRef.current !== 0 &&
+        Math.sign(openCodeWheelDeltaRef.current) !== Math.sign(event.deltaY)
+      ) {
+        openCodeWheelDeltaRef.current = 0;
+      }
+      openCodeWheelDeltaRef.current += event.deltaY;
+      const direction =
+        openCodeWheelDeltaRef.current <= -OPENCODE_WHEEL_STEP_THRESHOLD
+          ? 'up'
+          : openCodeWheelDeltaRef.current >= OPENCODE_WHEEL_STEP_THRESHOLD
+            ? 'down'
+            : null;
+
+      if (!direction) {
+        event.preventDefault();
+        return;
+      }
+
+      const now = Date.now();
+      if (now - openCodeWheelLastDispatchRef.current < OPENCODE_WHEEL_THROTTLE_MS) {
+        event.preventDefault();
+        return;
+      }
+
+      openCodeWheelLastDispatchRef.current = now;
+      openCodeWheelDeltaRef.current = 0;
+      terminal?.focus();
+      write(direction === 'up' ? TERMINAL_PAGE_UP_SEQUENCE : TERMINAL_PAGE_DOWN_SEQUENCE);
+      event.preventDefault();
+    };
+
+    wrapper.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+    return () => {
+      wrapper.removeEventListener('wheel', handleWheel, true);
+      openCodeWheelDeltaRef.current = 0;
+    };
+  }, [isOpenCodeAgent, terminal, terminalWrapperRef, write]);
+
+  // Cleanup idle timer on unmount
+  useEffect(() => {
+    return () => {
+      if (idleTimerRef.current) {
+        clearTimeout(idleTimerRef.current);
+      }
+    };
+  }, []);
 
   // Handle click to activate group
   const handleClick = useCallback(() => {
