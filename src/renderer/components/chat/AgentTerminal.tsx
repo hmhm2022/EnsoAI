@@ -115,8 +115,16 @@ const CODEX_HISTORY_TITLE_NOISE_PATTERNS = [
   /^请审查/,
 ] as const;
 const CODEX_ESC_CR_NEWLINE = '\x1b\r';
+const CODEX_RAW_OUTPUT_TOGGLE_SEQUENCE = '\x1br';
+const CODEX_OPEN_TRANSCRIPT_SEQUENCE = '\x14';
 const TERMINAL_PAGE_UP_SEQUENCE = '\x1b[5~';
 const TERMINAL_PAGE_DOWN_SEQUENCE = '\x1b[6~';
+const CODEX_WHEEL_STEP_THRESHOLD = 48;
+const CODEX_WHEEL_THROTTLE_MS = 90;
+const CODEX_WHEEL_RAW_RENDER_DELAY_MS = 140;
+const CODEX_WHEEL_OVERLAY_PENDING_GRACE_MS = 1200;
+const CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE = 'q';
+const CODEX_WHEEL_SCROLL_LINES = 3;
 const OPENCODE_WHEEL_STEP_THRESHOLD = 48;
 const OPENCODE_WHEEL_THROTTLE_MS = 90;
 
@@ -1291,6 +1299,13 @@ export function AgentTerminal({
     }
   }, [environment]);
   const outputBufferRef = useRef('');
+  const codexWheelDeltaRef = useRef(0);
+  const codexWheelLastDispatchRef = useRef(0);
+  const codexWheelAutoRawModeRef = useRef(false);
+  const codexWheelPendingScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codexWheelOverlayPendingRef = useRef(false);
+  const codexWheelOverlayActiveRef = useRef(false);
+  const codexWheelOverlayRequestedAtRef = useRef(0);
   const openCodeWheelDeltaRef = useRef(0);
   const openCodeWheelLastDispatchRef = useRef(0);
   const startTimeRef = useRef<number | null>(null);
@@ -2570,6 +2585,23 @@ export function AgentTerminal({
       // Codex 在嵌入式终端里对裸 LF 和 CSI-u 改造 Enter 兼容不稳。
       // 这里按 Claude terminal-setup 常用方案发送 ESC+CR，让 Codex 按 Alt+Enter 路径插入换行。
       if (isCodexAgent && event.type === 'keydown') {
+        const mayAffectOverlayState =
+          event.key === 'q' ||
+          event.key === 'Escape' ||
+          codexWheelOverlayActiveRef.current ||
+          codexWheelOverlayPendingRef.current;
+        const overlayVisible = mayAffectOverlayState
+          ? syncCodexOverlayState(`key:${event.key}`)
+          : false;
+        if (overlayVisible) {
+          if (event.key === 'q' && !event.ctrlKey && !event.altKey && !event.metaKey) {
+            codexWheelOverlayActiveRef.current = false;
+            codexWheelOverlayPendingRef.current = false;
+            codexWheelAutoRawModeRef.current = false;
+            codexWheelOverlayRequestedAtRef.current = 0;
+            clearCodexWheelPendingScroll();
+          }
+        }
         if (event.key === 'Enter' && event.shiftKey) {
           window.electronAPI.terminal.write(ptyId, CODEX_ESC_CR_NEWLINE);
           return false;
@@ -2930,6 +2962,167 @@ export function AgentTerminal({
     return () => container.removeEventListener('contextmenu', handleContextMenu);
   }, [handleContextMenu, containerRef]);
 
+  const clearCodexWheelPendingScroll = useCallback(() => {
+    if (codexWheelPendingScrollTimerRef.current) {
+      clearTimeout(codexWheelPendingScrollTimerRef.current);
+      codexWheelPendingScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const getCodexViewportSnapshot = useCallback(() => {
+    const activeBuffer = terminal?.buffer.active;
+    const viewportY = activeBuffer?.viewportY ?? 0;
+    const baseY = activeBuffer?.baseY ?? 0;
+    const bufferType = activeBuffer?.type ?? 'normal';
+    return {
+      viewportY,
+      baseY,
+      bufferType,
+      atBottom: viewportY >= baseY,
+    };
+  }, [terminal]);
+
+  const getCodexVisibleScreenText = useCallback(() => {
+    if (!terminal) {
+      return '';
+    }
+
+    const activeBuffer = terminal.buffer.active;
+    const startLine = activeBuffer.viewportY;
+    const endLine = Math.max(startLine, startLine + terminal.rows - 1);
+    const lines: string[] = [];
+
+    for (let lineIndex = startLine; lineIndex <= endLine; lineIndex += 1) {
+      const line = activeBuffer.getLine(lineIndex);
+      if (!line) {
+        continue;
+      }
+      lines.push(line.translateToString());
+    }
+
+    return normalizeCodexMatchingText(lines.join('\n'));
+  }, [terminal]);
+
+  const detectCodexTranscriptOverlay = useCallback(() => {
+    const screenText = getCodexVisibleScreenText();
+    const hasHeader = /\/\s*t\s*r\s*a\s*n\s*s\s*c\s*r\s*i\s*p\s*t\s*\//.test(screenText);
+    const hasQuitHint = screenText.includes('q to quit');
+    const hasPagerHint = screenText.includes('pgup/pgdn to page');
+    return {
+      visible: hasHeader || (hasQuitHint && hasPagerHint),
+      hasHeader,
+      hasQuitHint,
+      hasPagerHint,
+    };
+  }, [getCodexVisibleScreenText]);
+
+  const detectCodexTranscriptBottom = useCallback(() => {
+    const screenText = getCodexVisibleScreenText();
+    const bottomMatch = screenText.match(/(\d{1,3})%/g);
+    if (!bottomMatch || bottomMatch.length === 0) {
+      return {
+        atBottom: false,
+        percent: null as number | null,
+      };
+    }
+
+    const lastPercentText = bottomMatch[bottomMatch.length - 1];
+    const percent = Number.parseInt(lastPercentText.replace('%', ''), 10);
+    if (!Number.isFinite(percent)) {
+      return {
+        atBottom: false,
+        percent: null as number | null,
+      };
+    }
+
+    return {
+      atBottom: percent >= 100,
+      percent,
+    };
+  }, [getCodexVisibleScreenText]);
+
+  const syncCodexOverlayState = useCallback(
+    (_reason: string) => {
+      const detection = detectCodexTranscriptOverlay();
+      if (detection.visible) {
+        codexWheelOverlayActiveRef.current = true;
+        codexWheelOverlayPendingRef.current = false;
+        codexWheelAutoRawModeRef.current = false;
+        return true;
+      }
+
+      const withinPendingGrace =
+        codexWheelOverlayPendingRef.current &&
+        Date.now() - codexWheelOverlayRequestedAtRef.current < CODEX_WHEEL_OVERLAY_PENDING_GRACE_MS;
+
+      if (withinPendingGrace) {
+        return codexWheelOverlayActiveRef.current;
+      }
+
+      codexWheelOverlayActiveRef.current = false;
+      codexWheelOverlayPendingRef.current = false;
+      codexWheelOverlayRequestedAtRef.current = 0;
+      return false;
+    },
+    [detectCodexTranscriptOverlay]
+  );
+
+  const toggleCodexRawOutputMode = useCallback(
+    (enabled: boolean, _reason: string) => {
+      if (!write) {
+        return;
+      }
+      terminal?.focus();
+      write(CODEX_RAW_OUTPUT_TOGGLE_SEQUENCE);
+      codexWheelAutoRawModeRef.current = enabled;
+    },
+    [terminal, write]
+  );
+
+  const openCodexTranscriptOverlay = useCallback(
+    (_reason: string) => {
+      if (!write) {
+        return;
+      }
+      terminal?.focus();
+      write(CODEX_OPEN_TRANSCRIPT_SEQUENCE);
+      codexWheelOverlayRequestedAtRef.current = Date.now();
+      codexWheelOverlayPendingRef.current = true;
+      codexWheelOverlayActiveRef.current = true;
+    },
+    [terminal, write]
+  );
+
+  const scrollCodexViewport = useCallback(
+    (direction: 'up' | 'down', _reason: string) => {
+      if (!terminal) {
+        return;
+      }
+
+      const lines = direction === 'up' ? -CODEX_WHEEL_SCROLL_LINES : CODEX_WHEEL_SCROLL_LINES;
+      terminal.scrollLines(lines);
+      const snapshot = getCodexViewportSnapshot();
+
+      // 回到底部后自动退出 raw 模式，避免用户继续输入时还停留在历史视图。
+      if (direction === 'down' && codexWheelAutoRawModeRef.current && snapshot.atBottom) {
+        toggleCodexRawOutputMode(false, 'returned-to-bottom');
+      }
+    },
+    [getCodexViewportSnapshot, terminal, toggleCodexRawOutputMode]
+  );
+
+  const resetCodexWheelState = useCallback(
+    (_reason: string) => {
+      clearCodexWheelPendingScroll();
+      codexWheelDeltaRef.current = 0;
+      codexWheelAutoRawModeRef.current = false;
+      codexWheelOverlayPendingRef.current = false;
+      codexWheelOverlayActiveRef.current = false;
+      codexWheelOverlayRequestedAtRef.current = 0;
+    },
+    [clearCodexWheelPendingScroll]
+  );
+
   // Handle external file drop (from OS file manager, VS Code, etc.)
   const terminalWrapperRef = useFileDrop<HTMLDivElement>({
     cwd,
@@ -2994,6 +3187,154 @@ export function AgentTerminal({
       openCodeWheelDeltaRef.current = 0;
     };
   }, [isOpenCodeAgent, terminal, terminalWrapperRef, write]);
+
+  useEffect(() => {
+    if (!isCodexAgent) {
+      return;
+    }
+    return () => {
+      clearCodexWheelPendingScroll();
+      codexWheelDeltaRef.current = 0;
+      codexWheelAutoRawModeRef.current = false;
+      codexWheelOverlayPendingRef.current = false;
+      codexWheelOverlayActiveRef.current = false;
+      codexWheelOverlayRequestedAtRef.current = 0;
+    };
+  }, [clearCodexWheelPendingScroll, isCodexAgent]);
+
+  useEffect(() => {
+    const wrapper = terminalWrapperRef.current;
+    if (!wrapper || !isCodexAgent || !write) return;
+
+    // Codex 主视图不直接支持宿主终端那种滚轮回看。
+    // 这里按两种屏幕状态分别处理：
+    // 1. alternate screen 覆盖层：发 PageUp/PageDown 给 Codex 自己处理。
+    // 2. normal screen 主视图：自动切 raw output，再用 xterm 本地 scrollback 滚动。
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || event.deltaY === 0) {
+        return;
+      }
+      if (terminal?.hasSelection()) {
+        return;
+      }
+
+      if (
+        codexWheelDeltaRef.current !== 0 &&
+        Math.sign(codexWheelDeltaRef.current) !== Math.sign(event.deltaY)
+      ) {
+        codexWheelDeltaRef.current = 0;
+      }
+      codexWheelDeltaRef.current += event.deltaY;
+
+      const direction =
+        codexWheelDeltaRef.current <= -CODEX_WHEEL_STEP_THRESHOLD
+          ? 'up'
+          : codexWheelDeltaRef.current >= CODEX_WHEEL_STEP_THRESHOLD
+            ? 'down'
+            : null;
+
+      if (!direction) {
+        event.preventDefault();
+        return;
+      }
+
+      const now = Date.now();
+      if (now - codexWheelLastDispatchRef.current < CODEX_WHEEL_THROTTLE_MS) {
+        event.preventDefault();
+        return;
+      }
+
+      codexWheelLastDispatchRef.current = now;
+      codexWheelDeltaRef.current = 0;
+
+      const overlayVisible = syncCodexOverlayState(`wheel:${direction}`);
+      const snapshot = getCodexViewportSnapshot();
+
+      if (overlayVisible) {
+        codexWheelOverlayPendingRef.current = false;
+        clearCodexWheelPendingScroll();
+        if (direction === 'down') {
+          const bottomState = detectCodexTranscriptBottom();
+          if (bottomState.atBottom) {
+            terminal?.focus();
+            write(CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE);
+            codexWheelOverlayActiveRef.current = false;
+            codexWheelOverlayPendingRef.current = false;
+            codexWheelOverlayRequestedAtRef.current = 0;
+            event.preventDefault();
+            return;
+          }
+        }
+        terminal?.focus();
+        write(direction === 'up' ? TERMINAL_PAGE_UP_SEQUENCE : TERMINAL_PAGE_DOWN_SEQUENCE);
+        event.preventDefault();
+        return;
+      }
+
+      if (direction === 'up') {
+        if (!codexWheelAutoRawModeRef.current) {
+          clearCodexWheelPendingScroll();
+          toggleCodexRawOutputMode(true, 'wheel-up-enter-history');
+          codexWheelPendingScrollTimerRef.current = setTimeout(() => {
+            codexWheelPendingScrollTimerRef.current = null;
+            const nextSnapshot = getCodexViewportSnapshot();
+            if (nextSnapshot.baseY > 0) {
+              scrollCodexViewport('up', 'post-raw-toggle');
+              return;
+            }
+
+            // 如果切到 raw output 后 scrollback 仍然为空，退回 Codex 自己的 transcript overlay。
+            // 这说明当前版本的 Codex 没把历史真正写进宿主终端缓冲区。
+            if (!codexWheelOverlayPendingRef.current) {
+              openCodexTranscriptOverlay('raw-output-has-no-scrollback');
+            }
+          }, CODEX_WHEEL_RAW_RENDER_DELAY_MS);
+        } else {
+          if (snapshot.baseY > 0) {
+            scrollCodexViewport('up', 'history-mode');
+          } else if (syncCodexOverlayState('history-mode-wheel-up')) {
+            clearCodexWheelPendingScroll();
+            terminal?.focus();
+            write(TERMINAL_PAGE_UP_SEQUENCE);
+          } else if (!codexWheelOverlayPendingRef.current) {
+            openCodexTranscriptOverlay('history-mode-has-no-scrollback');
+          }
+        }
+        event.preventDefault();
+        return;
+      }
+
+      if (codexWheelAutoRawModeRef.current || !snapshot.atBottom) {
+        clearCodexWheelPendingScroll();
+        if (snapshot.baseY > 0) {
+          scrollCodexViewport('down', 'history-mode');
+        } else if (syncCodexOverlayState('history-mode-wheel-down')) {
+          terminal?.focus();
+          write(TERMINAL_PAGE_DOWN_SEQUENCE);
+        }
+        event.preventDefault();
+      }
+    };
+
+    wrapper.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+    return () => {
+      wrapper.removeEventListener('wheel', handleWheel, true);
+      resetCodexWheelState('effect-cleanup');
+    };
+  }, [
+    clearCodexWheelPendingScroll,
+    detectCodexTranscriptBottom,
+    getCodexViewportSnapshot,
+    isCodexAgent,
+    openCodexTranscriptOverlay,
+    resetCodexWheelState,
+    scrollCodexViewport,
+    syncCodexOverlayState,
+    terminal,
+    terminalWrapperRef,
+    toggleCodexRawOutputMode,
+    write,
+  ]);
 
   // Cleanup idle timer on unmount
   useEffect(() => {
