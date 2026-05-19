@@ -138,6 +138,8 @@ export function GeneralSettings() {
     setOpenInMenuFilterEnabled,
     copyOnSelection,
     setCopyOnSelection,
+    codexTranscriptMode,
+    setCodexTranscriptMode,
     todoEnabled,
     setTodoEnabled,
     temporaryWorkspaceEnabled,
@@ -1041,6 +1043,18 @@ export function GeneralSettings() {
             {t('Automatically copy selected text in the terminal to the clipboard')}
           </p>
           <Switch checked={copyOnSelection} onCheckedChange={setCopyOnSelection} />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-[100px_1fr] items-center gap-4">
+        <span className="text-sm font-medium">{t('Codex Transcript Mode')}</span>
+        <div className="flex items-center justify-between gap-4">
+          <p className="text-sm text-muted-foreground">
+            {t(
+              'Fallback for Codex agent scrolling issues on Windows 10 (DOM renderer recommended)'
+            )}
+          </p>
+          <Switch checked={codexTranscriptMode} onCheckedChange={setCodexTranscriptMode} />
         </div>
       </div>
 

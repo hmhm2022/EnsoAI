@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer';
 import 'electron-log/preload.js';
+import os from 'node:os';
 import type { Locale } from '@shared/i18n';
 import type {
   AgentCliInfo,
@@ -596,6 +597,7 @@ const electronAPI = {
   env: {
     HOME: process.env.HOME || process.env.USERPROFILE || '',
     platform: process.platform as 'darwin' | 'win32' | 'linux',
+    osRelease: os.release(),
     appVersion: pkg.version,
   },
 

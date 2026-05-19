@@ -56,6 +56,35 @@ const MIN_OUTPUT_FOR_INDICATOR = 200; // Minimum chars to show "outputting" indi
 const ACTIVITY_POLL_INTERVAL_MS = 1000; // Poll process activity every 1000ms
 const IDLE_CONFIRMATION_COUNT = 2; // Require 2 consecutive idle polls (2 seconds) before marking as idle
 const RECENT_OUTPUT_TIMEOUT_MS = 3000; // If output received within this time, consider still active
+const CODEX_OPEN_TRANSCRIPT_SEQUENCE = '\x14';
+const TERMINAL_PAGE_UP_SEQUENCE = '\x1b[5~';
+const TERMINAL_PAGE_DOWN_SEQUENCE = '\x1b[6~';
+const CODEX_WHEEL_STEP_THRESHOLD = 48;
+const CODEX_WHEEL_THROTTLE_MS = 90;
+const CODEX_WHEEL_OVERLAY_PENDING_GRACE_MS = 1200;
+const CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE = 'q';
+const CODEX_WHEEL_SCROLL_LINES = 3;
+const OPENCODE_WHEEL_STEP_THRESHOLD = 48;
+const OPENCODE_WHEEL_THROTTLE_MS = 90;
+
+// biome-ignore lint/complexity/useRegexLiterals: ANSI 转义序列用构造函数更直观
+const CODEX_TRANSCRIPT_OSC_REGEX = new RegExp('\x1b][^\x07]*(?:\x07|\x1b\\\\)', 'g');
+// biome-ignore lint/complexity/useRegexLiterals: ANSI 转义序列用构造函数更直观
+const CODEX_TRANSCRIPT_CSI_REGEX = new RegExp('\x1b[[0-?]*[ -/]*[@-~]', 'g');
+// biome-ignore lint/complexity/useRegexLiterals: ANSI 转义序列用构造函数更直观
+const CODEX_TRANSCRIPT_ESC_REGEX = new RegExp('\x1b[@-_]', 'g');
+
+function normalizeCodexMatchingText(text: string): string {
+  return text
+    .replace(CODEX_TRANSCRIPT_OSC_REGEX, ' ')
+    .replace(CODEX_TRANSCRIPT_CSI_REGEX, ' ')
+    .replace(CODEX_TRANSCRIPT_ESC_REGEX, ' ')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
 
 export function AgentTerminal({
   id,
@@ -86,6 +115,34 @@ export function AgentTerminal({
   onUnregisterEnhancedInputSender,
 }: AgentTerminalProps) {
   const { t } = useI18n();
+  const baseAgentId = useMemo(() => {
+    if (agentId.endsWith('-hapi')) {
+      return agentId.slice(0, -5);
+    }
+    if (agentId.endsWith('-happy')) {
+      return agentId.slice(0, -6);
+    }
+    return agentId;
+  }, [agentId]);
+  const isCodexAgent = baseAgentId === 'codex';
+  const isOpenCodeAgent = baseAgentId === 'opencode';
+  const isWindows10 = useMemo(() => {
+    if (window.electronAPI?.env?.platform !== 'win32') {
+      return false;
+    }
+    const release = window.electronAPI?.env?.osRelease ?? '';
+    const [majorText = '', minorText = '', buildText = ''] = release.split('.');
+    const major = Number.parseInt(majorText, 10);
+    const minor = Number.parseInt(minorText, 10);
+    const build = Number.parseInt(buildText, 10);
+
+    if (major !== 10 || minor !== 0 || !Number.isFinite(build)) {
+      return false;
+    }
+
+    // Windows 11 从 build 22000 开始，Windows 10 小于这个值。
+    return build < 22000;
+  }, []);
   const {
     agentNotificationEnabled,
     agentNotificationDelay,
@@ -94,6 +151,7 @@ export function AgentTerminal({
     shellConfig,
     claudeCodeIntegration,
     glowEffectEnabled,
+    codexTranscriptMode,
   } = useSettingsStore();
 
   // Track if hapi is globally installed (cached in main process)
@@ -118,6 +176,13 @@ export function AgentTerminal({
       });
     }
   }, [environment]);
+  const codexWheelDeltaRef = useRef(0);
+  const codexWheelLastDispatchRef = useRef(0);
+  const codexWheelOverlayPendingRef = useRef(false);
+  const codexWheelOverlayActiveRef = useRef(false);
+  const codexWheelOverlayRequestedAtRef = useRef(0);
+  const openCodeWheelDeltaRef = useRef(0);
+  const openCodeWheelLastDispatchRef = useRef(0);
   const outputBufferRef = useRef('');
   const startTimeRef = useRef<number | null>(null);
   const hasInitializedRef = useRef(false);
@@ -888,6 +953,124 @@ export function AgentTerminal({
     return () => container.removeEventListener('contextmenu', handleContextMenu);
   }, [handleContextMenu, containerRef]);
 
+  const getCodexViewportSnapshot = useCallback(() => {
+    const activeBuffer = terminal?.buffer.active;
+    const viewportY = activeBuffer?.viewportY ?? 0;
+    const baseY = activeBuffer?.baseY ?? 0;
+    const bufferType = activeBuffer?.type ?? 'normal';
+    return {
+      viewportY,
+      baseY,
+      bufferType,
+      atBottom: viewportY >= baseY,
+    };
+  }, [terminal]);
+
+  const getCodexVisibleScreenText = useCallback(() => {
+    if (!terminal) {
+      return '';
+    }
+
+    const activeBuffer = terminal.buffer.active;
+    const startLine = activeBuffer.viewportY;
+    const endLine = Math.max(startLine, startLine + terminal.rows - 1);
+    const lines: string[] = [];
+
+    for (let lineIndex = startLine; lineIndex <= endLine; lineIndex += 1) {
+      const line = activeBuffer.getLine(lineIndex);
+      if (!line) {
+        continue;
+      }
+      lines.push(line.translateToString());
+    }
+
+    return normalizeCodexMatchingText(lines.join('\n'));
+  }, [terminal]);
+
+  const detectCodexTranscriptOverlay = useCallback(() => {
+    const screenText = getCodexVisibleScreenText();
+    const hasHeader = /\/\s*t\s*r\s*a\s*n\s*s\s*c\s*r\s*i\s*p\s*t\s*\//.test(screenText);
+    const hasQuitHint = screenText.includes('q to quit');
+    const hasPagerHint = screenText.includes('pgup/pgdn to page');
+    return {
+      visible: hasHeader || (hasQuitHint && hasPagerHint),
+      hasHeader,
+      hasQuitHint,
+      hasPagerHint,
+    };
+  }, [getCodexVisibleScreenText]);
+
+  const detectCodexTranscriptBottom = useCallback(() => {
+    const screenText = getCodexVisibleScreenText();
+    const bottomMatch = screenText.match(/(\d{1,3})%/g);
+    if (!bottomMatch || bottomMatch.length === 0) {
+      return {
+        atBottom: false,
+        percent: null as number | null,
+      };
+    }
+
+    const lastPercentText = bottomMatch[bottomMatch.length - 1];
+    const percent = Number.parseInt(lastPercentText.replace('%', ''), 10);
+    if (!Number.isFinite(percent)) {
+      return {
+        atBottom: false,
+        percent: null as number | null,
+      };
+    }
+
+    return {
+      atBottom: percent >= 100,
+      percent,
+    };
+  }, [getCodexVisibleScreenText]);
+
+  const syncCodexOverlayState = useCallback(
+    (_reason: string) => {
+      const detection = detectCodexTranscriptOverlay();
+      if (detection.visible) {
+        codexWheelOverlayActiveRef.current = true;
+        codexWheelOverlayPendingRef.current = false;
+        return true;
+      }
+
+      const withinPendingGrace =
+        codexWheelOverlayPendingRef.current &&
+        Date.now() - codexWheelOverlayRequestedAtRef.current < CODEX_WHEEL_OVERLAY_PENDING_GRACE_MS;
+
+      if (withinPendingGrace) {
+        return codexWheelOverlayActiveRef.current;
+      }
+
+      codexWheelOverlayActiveRef.current = false;
+      codexWheelOverlayPendingRef.current = false;
+      codexWheelOverlayRequestedAtRef.current = 0;
+      return false;
+    },
+    [detectCodexTranscriptOverlay]
+  );
+
+  const openCodexTranscriptOverlay = useCallback(
+    (_reason: string) => {
+      if (!write) {
+        return;
+      }
+      terminal?.focus();
+      write(CODEX_OPEN_TRANSCRIPT_SEQUENCE);
+      codexWheelOverlayRequestedAtRef.current = Date.now();
+      codexWheelOverlayPendingRef.current = true;
+      codexWheelOverlayActiveRef.current = true;
+    },
+    [terminal, write]
+  );
+
+  const resetCodexWheelState = useCallback((_reason: string) => {
+    codexWheelDeltaRef.current = 0;
+    codexWheelOverlayPendingRef.current = false;
+    codexWheelOverlayActiveRef.current = false;
+    codexWheelOverlayRequestedAtRef.current = 0;
+  }, []);
+
   // Cleanup idle timer on unmount
   useEffect(() => {
     return () => {
@@ -910,6 +1093,170 @@ export function AgentTerminal({
       [write, terminal]
     ),
   });
+
+  useEffect(() => {
+    const wrapper = terminalWrapperRef.current;
+    if (!wrapper || !isOpenCodeAgent || !write) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || event.deltaY === 0) {
+        return;
+      }
+      if (terminal?.hasSelection()) {
+        return;
+      }
+
+      if (
+        openCodeWheelDeltaRef.current !== 0 &&
+        Math.sign(openCodeWheelDeltaRef.current) !== Math.sign(event.deltaY)
+      ) {
+        openCodeWheelDeltaRef.current = 0;
+      }
+      openCodeWheelDeltaRef.current += event.deltaY;
+
+      const direction =
+        openCodeWheelDeltaRef.current <= -OPENCODE_WHEEL_STEP_THRESHOLD
+          ? 'up'
+          : openCodeWheelDeltaRef.current >= OPENCODE_WHEEL_STEP_THRESHOLD
+            ? 'down'
+            : null;
+
+      if (!direction) {
+        event.preventDefault();
+        return;
+      }
+
+      const now = Date.now();
+      if (now - openCodeWheelLastDispatchRef.current < OPENCODE_WHEEL_THROTTLE_MS) {
+        event.preventDefault();
+        return;
+      }
+
+      openCodeWheelLastDispatchRef.current = now;
+      openCodeWheelDeltaRef.current = 0;
+      terminal?.focus();
+      write(direction === 'up' ? TERMINAL_PAGE_UP_SEQUENCE : TERMINAL_PAGE_DOWN_SEQUENCE);
+      event.preventDefault();
+    };
+
+    wrapper.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+    return () => {
+      wrapper.removeEventListener('wheel', handleWheel, true);
+      openCodeWheelDeltaRef.current = 0;
+    };
+  }, [isOpenCodeAgent, terminal, terminalWrapperRef, write]);
+
+  useEffect(() => {
+    if (!isCodexAgent) {
+      return;
+    }
+    return () => {
+      codexWheelDeltaRef.current = 0;
+      codexWheelOverlayPendingRef.current = false;
+      codexWheelOverlayActiveRef.current = false;
+      codexWheelOverlayRequestedAtRef.current = 0;
+    };
+  }, [isCodexAgent]);
+
+  useEffect(() => {
+    const wrapper = terminalWrapperRef.current;
+    if (!wrapper || !isCodexAgent || !write || !isWindows10 || !codexTranscriptMode) return;
+
+    // Win10 兼容模式下，上滑直接进入 transcript；进入后再由 transcript 自己处理翻页。
+    const handleWheel = (event: WheelEvent) => {
+      if (Math.abs(event.deltaY) <= Math.abs(event.deltaX) || event.deltaY === 0) {
+        return;
+      }
+      if (terminal?.hasSelection()) {
+        return;
+      }
+
+      if (
+        codexWheelDeltaRef.current !== 0 &&
+        Math.sign(codexWheelDeltaRef.current) !== Math.sign(event.deltaY)
+      ) {
+        codexWheelDeltaRef.current = 0;
+      }
+      codexWheelDeltaRef.current += event.deltaY;
+
+      const direction =
+        codexWheelDeltaRef.current <= -CODEX_WHEEL_STEP_THRESHOLD
+          ? 'up'
+          : codexWheelDeltaRef.current >= CODEX_WHEEL_STEP_THRESHOLD
+            ? 'down'
+            : null;
+
+      if (!direction) {
+        event.preventDefault();
+        return;
+      }
+
+      const now = Date.now();
+      if (now - codexWheelLastDispatchRef.current < CODEX_WHEEL_THROTTLE_MS) {
+        event.preventDefault();
+        return;
+      }
+
+      codexWheelLastDispatchRef.current = now;
+      codexWheelDeltaRef.current = 0;
+      const overlayVisible = syncCodexOverlayState(`wheel:${direction}`);
+      const snapshot = getCodexViewportSnapshot();
+
+      if (overlayVisible) {
+        codexWheelOverlayPendingRef.current = false;
+        if (direction === 'down') {
+          const bottomState = detectCodexTranscriptBottom();
+          if (bottomState.atBottom) {
+            terminal?.focus();
+            write(CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE);
+            codexWheelOverlayActiveRef.current = false;
+            codexWheelOverlayPendingRef.current = false;
+            codexWheelOverlayRequestedAtRef.current = 0;
+            event.preventDefault();
+            return;
+          }
+        }
+        terminal?.focus();
+        write(direction === 'up' ? TERMINAL_PAGE_UP_SEQUENCE : TERMINAL_PAGE_DOWN_SEQUENCE);
+        event.preventDefault();
+        return;
+      }
+
+      if (direction === 'up') {
+        openCodexTranscriptOverlay('wheel-up-direct-transcript');
+        event.preventDefault();
+        return;
+      }
+
+      if (!snapshot.atBottom) {
+        if (snapshot.baseY > 0) {
+          terminal?.scrollLines(CODEX_WHEEL_SCROLL_LINES);
+        } else if (syncCodexOverlayState('history-mode-wheel-down')) {
+          terminal?.focus();
+          write(TERMINAL_PAGE_DOWN_SEQUENCE);
+        }
+        event.preventDefault();
+      }
+    };
+
+    wrapper.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+    return () => {
+      wrapper.removeEventListener('wheel', handleWheel, true);
+      resetCodexWheelState('effect-cleanup');
+    };
+  }, [
+    detectCodexTranscriptBottom,
+    codexTranscriptMode,
+    getCodexViewportSnapshot,
+    isCodexAgent,
+    isWindows10,
+    openCodexTranscriptOverlay,
+    resetCodexWheelState,
+    syncCodexOverlayState,
+    terminal,
+    terminalWrapperRef,
+    write,
+  ]);
 
   // Handle click to activate group
   const handleClick = useCallback(() => {

@@ -117,6 +117,7 @@ function getInitialState() {
     terminalScrollback: 10000,
     terminalOptionIsMeta: true,
     copyOnSelection: false,
+    codexTranscriptMode: false,
 
     // Keybindings
     xtermKeybindings: defaultXtermKeybindings,
@@ -277,6 +278,7 @@ export const useSettingsStore = create<SettingsState>()(
       setTerminalScrollback: (terminalScrollback) => set({ terminalScrollback }),
       setTerminalOptionIsMeta: (terminalOptionIsMeta) => set({ terminalOptionIsMeta }),
       setCopyOnSelection: (copyOnSelection) => set({ copyOnSelection }),
+      setCodexTranscriptMode: (codexTranscriptMode) => set({ codexTranscriptMode }),
 
       // Keybinding Setters
       setXtermKeybindings: (xtermKeybindings) => set({ xtermKeybindings }),

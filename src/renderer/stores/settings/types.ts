@@ -309,6 +309,7 @@ export interface SettingsState {
   terminalScrollback: number;
   terminalOptionIsMeta: boolean;
   copyOnSelection: boolean;
+  codexTranscriptMode: boolean;
 
   // Keybindings
   xtermKeybindings: XtermKeybindings;
@@ -425,6 +426,7 @@ export interface SettingsState {
   setTerminalScrollback: (scrollback: number) => void;
   setTerminalOptionIsMeta: (enabled: boolean) => void;
   setCopyOnSelection: (enabled: boolean) => void;
+  setCodexTranscriptMode: (enabled: boolean) => void;
 
   // Setters - Keybindings
   setXtermKeybindings: (keybindings: XtermKeybindings) => void;

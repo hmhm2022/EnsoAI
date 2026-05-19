@@ -1327,6 +1327,9 @@ export const zhTranslations: Record<string, string> = {
   'Copy on Selection': '选中即复制',
   'Automatically copy selected text in the terminal to the clipboard':
     '自动将终端中选中的文本复制到剪贴板',
+  'Codex Transcript Mode': 'Codex Transcript 模式',
+  'Fallback for Codex agent scrolling issues on Windows 10 (DOM renderer recommended)':
+    'windows 10 系统 Codex agent 滚屏失效替代方案（建议DOM模式）',
   // Logging
   Logging: '日志记录',
   'Enable Logging': '启用日志',
