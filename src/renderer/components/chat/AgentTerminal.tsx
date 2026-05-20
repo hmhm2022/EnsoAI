@@ -123,6 +123,9 @@ const CODEX_WHEEL_STEP_THRESHOLD = 48;
 const CODEX_WHEEL_THROTTLE_MS = 90;
 const CODEX_WHEEL_RAW_RENDER_DELAY_MS = 140;
 const CODEX_WHEEL_OVERLAY_PENDING_GRACE_MS = 1200;
+const CODEX_WHEEL_NATIVE_SCROLL_PROBE_INTERVAL_MS = 120;
+const CODEX_WHEEL_NATIVE_SCROLL_PROBE_TIMEOUT_MS = 420;
+const CODEX_WHEEL_TRANSCRIPT_EXIT_CONFIRM_DELAY_MS = 160;
 const CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE = 'q';
 const CODEX_WHEEL_SCROLL_LINES = 3;
 const OPENCODE_WHEEL_STEP_THRESHOLD = 48;
@@ -1306,6 +1309,9 @@ export function AgentTerminal({
   const codexWheelOverlayPendingRef = useRef(false);
   const codexWheelOverlayActiveRef = useRef(false);
   const codexWheelOverlayRequestedAtRef = useRef(0);
+  const codexWheelNativeProbePendingRef = useRef(false);
+  const codexWheelExitConfirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const codexWheelSuppressNativeScrollRef = useRef(false);
   const openCodeWheelDeltaRef = useRef(0);
   const openCodeWheelLastDispatchRef = useRef(0);
   const startTimeRef = useRef<number | null>(null);
@@ -2600,6 +2606,7 @@ export function AgentTerminal({
             codexWheelAutoRawModeRef.current = false;
             codexWheelOverlayRequestedAtRef.current = 0;
             clearCodexWheelPendingScroll();
+            scheduleCodexTranscriptExitConfirmation();
           }
         }
         if (event.key === 'Enter' && event.shiftKey) {
@@ -2962,10 +2969,31 @@ export function AgentTerminal({
     return () => container.removeEventListener('contextmenu', handleContextMenu);
   }, [handleContextMenu, containerRef]);
 
+  const logCodexWheelDebug = useCallback(
+    (message: string, details?: Record<string, unknown>) => {
+      if (!isCodexAgent) {
+        return;
+      }
+      console.debug('[CodexWheel]', message, {
+        agentId,
+        terminalSessionId,
+        ...details,
+      });
+    },
+    [agentId, isCodexAgent, terminalSessionId]
+  );
+
   const clearCodexWheelPendingScroll = useCallback(() => {
     if (codexWheelPendingScrollTimerRef.current) {
       clearTimeout(codexWheelPendingScrollTimerRef.current);
       codexWheelPendingScrollTimerRef.current = null;
+    }
+  }, []);
+
+  const clearCodexWheelExitConfirmTimer = useCallback(() => {
+    if (codexWheelExitConfirmTimerRef.current) {
+      clearTimeout(codexWheelExitConfirmTimerRef.current);
+      codexWheelExitConfirmTimerRef.current = null;
     }
   }, []);
 
@@ -3041,13 +3069,48 @@ export function AgentTerminal({
     };
   }, [getCodexVisibleScreenText]);
 
+  const detectCodexNativeScrollState = useCallback(
+    (snapshot?: ReturnType<typeof getCodexViewportSnapshot>, overlayVisible = false) => {
+      const nextSnapshot = snapshot ?? getCodexViewportSnapshot();
+      return {
+        active:
+          !overlayVisible && !codexWheelSuppressNativeScrollRef.current && nextSnapshot.baseY > 0,
+        snapshot: nextSnapshot,
+      };
+    },
+    [getCodexViewportSnapshot]
+  );
+
+  const restoreCodexInitialViewport = useCallback(
+    (reason: string) => {
+      codexWheelAutoRawModeRef.current = false;
+      codexWheelSuppressNativeScrollRef.current = true;
+      if (!terminal) {
+        return;
+      }
+      terminal.scrollToBottom();
+      terminal.focus();
+      logCodexWheelDebug('restore-initial-viewport', {
+        reason,
+        snapshot: getCodexViewportSnapshot(),
+      });
+    },
+    [getCodexViewportSnapshot, logCodexWheelDebug, terminal]
+  );
+
   const syncCodexOverlayState = useCallback(
-    (_reason: string) => {
+    (reason: string) => {
       const detection = detectCodexTranscriptOverlay();
       if (detection.visible) {
         codexWheelOverlayActiveRef.current = true;
         codexWheelOverlayPendingRef.current = false;
         codexWheelAutoRawModeRef.current = false;
+        logCodexWheelDebug('mode-transcript', {
+          reason,
+          hasHeader: detection.hasHeader,
+          hasQuitHint: detection.hasQuitHint,
+          hasPagerHint: detection.hasPagerHint,
+        });
         return true;
       }
 
@@ -3064,23 +3127,88 @@ export function AgentTerminal({
       codexWheelOverlayRequestedAtRef.current = 0;
       return false;
     },
-    [detectCodexTranscriptOverlay]
+    [detectCodexTranscriptOverlay, logCodexWheelDebug]
+  );
+
+  const scheduleCodexTranscriptExitConfirmation = useCallback(() => {
+    clearCodexWheelExitConfirmTimer();
+    codexWheelExitConfirmTimerRef.current = setTimeout(() => {
+      codexWheelExitConfirmTimerRef.current = null;
+      const overlayVisible = syncCodexOverlayState('transcript-exit-confirm');
+      if (!overlayVisible) {
+        restoreCodexInitialViewport('transcript-exit-confirm');
+      }
+      const snapshot = getCodexViewportSnapshot();
+      const nativeScrollState = detectCodexNativeScrollState(snapshot, overlayVisible);
+      logCodexWheelDebug('transcript-exit-result', {
+        overlayVisible,
+        nativeScrollActive: nativeScrollState.active,
+        snapshot,
+      });
+    }, CODEX_WHEEL_TRANSCRIPT_EXIT_CONFIRM_DELAY_MS);
+  }, [
+    clearCodexWheelExitConfirmTimer,
+    detectCodexNativeScrollState,
+    getCodexViewportSnapshot,
+    logCodexWheelDebug,
+    restoreCodexInitialViewport,
+    syncCodexOverlayState,
+  ]);
+
+  const scheduleCodexNativeScrollProbe = useCallback(
+    (
+      onReady: (snapshot: ReturnType<typeof getCodexViewportSnapshot>) => void,
+      onFallback: () => void
+    ) => {
+      codexWheelNativeProbePendingRef.current = true;
+      const startedAt = Date.now();
+
+      const poll = () => {
+        const overlayVisible = syncCodexOverlayState('native-scroll-probe');
+        const snapshot = getCodexViewportSnapshot();
+        const nativeScrollState = detectCodexNativeScrollState(snapshot, overlayVisible);
+
+        if (nativeScrollState.active) {
+          codexWheelNativeProbePendingRef.current = false;
+          onReady(snapshot);
+          return;
+        }
+
+        if (Date.now() - startedAt >= CODEX_WHEEL_NATIVE_SCROLL_PROBE_TIMEOUT_MS) {
+          codexWheelNativeProbePendingRef.current = false;
+          onFallback();
+          return;
+        }
+
+        codexWheelPendingScrollTimerRef.current = setTimeout(
+          poll,
+          CODEX_WHEEL_NATIVE_SCROLL_PROBE_INTERVAL_MS
+        );
+      };
+
+      codexWheelPendingScrollTimerRef.current = setTimeout(
+        poll,
+        CODEX_WHEEL_NATIVE_SCROLL_PROBE_INTERVAL_MS
+      );
+    },
+    [detectCodexNativeScrollState, getCodexViewportSnapshot, syncCodexOverlayState]
   );
 
   const toggleCodexRawOutputMode = useCallback(
-    (enabled: boolean, _reason: string) => {
+    (enabled: boolean, reason: string) => {
       if (!write) {
         return;
       }
       terminal?.focus();
       write(CODEX_RAW_OUTPUT_TOGGLE_SEQUENCE);
       codexWheelAutoRawModeRef.current = enabled;
+      logCodexWheelDebug('toggle-raw', { enabled, reason });
     },
-    [terminal, write]
+    [logCodexWheelDebug, terminal, write]
   );
 
   const openCodexTranscriptOverlay = useCallback(
-    (_reason: string) => {
+    (reason: string) => {
       if (!write) {
         return;
       }
@@ -3089,12 +3217,23 @@ export function AgentTerminal({
       codexWheelOverlayRequestedAtRef.current = Date.now();
       codexWheelOverlayPendingRef.current = true;
       codexWheelOverlayActiveRef.current = true;
+      logCodexWheelDebug('open-transcript', { reason });
     },
-    [terminal, write]
+    [logCodexWheelDebug, terminal, write]
+  );
+
+  const restoreCodexRawOutputMode = useCallback(
+    (_reason: string) => {
+      if (!codexWheelAutoRawModeRef.current) {
+        return;
+      }
+      toggleCodexRawOutputMode(false, 'restore-before-overlay');
+    },
+    [toggleCodexRawOutputMode]
   );
 
   const scrollCodexViewport = useCallback(
-    (direction: 'up' | 'down', _reason: string) => {
+    (direction: 'up' | 'down', reason: string) => {
       if (!terminal) {
         return;
       }
@@ -3102,25 +3241,33 @@ export function AgentTerminal({
       const lines = direction === 'up' ? -CODEX_WHEEL_SCROLL_LINES : CODEX_WHEEL_SCROLL_LINES;
       terminal.scrollLines(lines);
       const snapshot = getCodexViewportSnapshot();
+      logCodexWheelDebug('native-scroll', {
+        direction,
+        reason,
+        snapshot,
+      });
 
-      // 回到底部后自动退出 raw 模式，避免用户继续输入时还停留在历史视图。
       if (direction === 'down' && codexWheelAutoRawModeRef.current && snapshot.atBottom) {
         toggleCodexRawOutputMode(false, 'returned-to-bottom');
       }
     },
-    [getCodexViewportSnapshot, terminal, toggleCodexRawOutputMode]
+    [getCodexViewportSnapshot, logCodexWheelDebug, terminal, toggleCodexRawOutputMode]
   );
 
   const resetCodexWheelState = useCallback(
-    (_reason: string) => {
+    (reason: string) => {
       clearCodexWheelPendingScroll();
+      clearCodexWheelExitConfirmTimer();
       codexWheelDeltaRef.current = 0;
       codexWheelAutoRawModeRef.current = false;
       codexWheelOverlayPendingRef.current = false;
       codexWheelOverlayActiveRef.current = false;
       codexWheelOverlayRequestedAtRef.current = 0;
+      codexWheelNativeProbePendingRef.current = false;
+      codexWheelSuppressNativeScrollRef.current = false;
+      logCodexWheelDebug('reset-state', { reason });
     },
-    [clearCodexWheelPendingScroll]
+    [clearCodexWheelExitConfirmTimer, clearCodexWheelPendingScroll, logCodexWheelDebug]
   );
 
   // Handle external file drop (from OS file manager, VS Code, etc.)
@@ -3199,6 +3346,7 @@ export function AgentTerminal({
       codexWheelOverlayPendingRef.current = false;
       codexWheelOverlayActiveRef.current = false;
       codexWheelOverlayRequestedAtRef.current = 0;
+      codexWheelSuppressNativeScrollRef.current = false;
     };
   }, [clearCodexWheelPendingScroll, isCodexAgent]);
 
@@ -3249,10 +3397,20 @@ export function AgentTerminal({
 
       const overlayVisible = syncCodexOverlayState(`wheel:${direction}`);
       const snapshot = getCodexViewportSnapshot();
+      const nativeScrollState = detectCodexNativeScrollState(snapshot, overlayVisible);
+      logCodexWheelDebug('wheel-dispatch', {
+        direction,
+        deltaY: event.deltaY,
+        snapshot,
+        overlayVisible,
+        nativeScrollActive: nativeScrollState.active,
+        rawMode: codexWheelAutoRawModeRef.current,
+      });
 
       if (overlayVisible) {
         codexWheelOverlayPendingRef.current = false;
         clearCodexWheelPendingScroll();
+        codexWheelNativeProbePendingRef.current = false;
         if (direction === 'down') {
           const bottomState = detectCodexTranscriptBottom();
           if (bottomState.atBottom) {
@@ -3261,6 +3419,12 @@ export function AgentTerminal({
             codexWheelOverlayActiveRef.current = false;
             codexWheelOverlayPendingRef.current = false;
             codexWheelOverlayRequestedAtRef.current = 0;
+            codexWheelAutoRawModeRef.current = false;
+            codexWheelSuppressNativeScrollRef.current = true;
+            logCodexWheelDebug('transcript-exit-to-initial', {
+              percent: bottomState.percent,
+            });
+            scheduleCodexTranscriptExitConfirmation();
             event.preventDefault();
             return;
           }
@@ -3271,32 +3435,63 @@ export function AgentTerminal({
         return;
       }
 
+      if (nativeScrollState.active) {
+        clearCodexWheelPendingScroll();
+        logCodexWheelDebug('continue-native-scroll', {
+          direction,
+          snapshot,
+        });
+        scrollCodexViewport(direction, 'native-scroll-active');
+        event.preventDefault();
+        return;
+      }
+
       if (direction === 'up') {
+        codexWheelSuppressNativeScrollRef.current = false;
         if (!codexWheelAutoRawModeRef.current) {
           clearCodexWheelPendingScroll();
           toggleCodexRawOutputMode(true, 'wheel-up-enter-history');
           codexWheelPendingScrollTimerRef.current = setTimeout(() => {
             codexWheelPendingScrollTimerRef.current = null;
-            const nextSnapshot = getCodexViewportSnapshot();
-            if (nextSnapshot.baseY > 0) {
-              scrollCodexViewport('up', 'post-raw-toggle');
-              return;
-            }
-
-            // 如果切到 raw output 后 scrollback 仍然为空，退回 Codex 自己的 transcript overlay。
-            // 这说明当前版本的 Codex 没把历史真正写进宿主终端缓冲区。
-            if (!codexWheelOverlayPendingRef.current) {
-              openCodexTranscriptOverlay('raw-output-has-no-scrollback');
-            }
+            scheduleCodexNativeScrollProbe(
+              (nextSnapshot) => {
+                logCodexWheelDebug('enter-native-scroll', {
+                  source: 'post-raw-toggle',
+                  snapshot: nextSnapshot,
+                });
+                scrollCodexViewport('up', 'post-raw-toggle');
+              },
+              () => {
+                const fallbackSnapshot = getCodexViewportSnapshot();
+                // 如果切到 raw output 后 scrollback 仍然为空，退回 Codex 自己的 transcript overlay。
+                // 这说明当前版本的 Codex 没把历史真正写进宿主终端缓冲区。
+                if (!codexWheelOverlayPendingRef.current) {
+                  logCodexWheelDebug('fallback-to-transcript', {
+                    source: 'post-raw-toggle',
+                    snapshot: fallbackSnapshot,
+                  });
+                  restoreCodexRawOutputMode('raw-output-has-no-scrollback');
+                  openCodexTranscriptOverlay('raw-output-has-no-scrollback');
+                }
+              }
+            );
           }, CODEX_WHEEL_RAW_RENDER_DELAY_MS);
         } else {
-          if (snapshot.baseY > 0) {
-            scrollCodexViewport('up', 'history-mode');
-          } else if (syncCodexOverlayState('history-mode-wheel-up')) {
+          if (codexWheelNativeProbePendingRef.current) {
+            event.preventDefault();
+            return;
+          }
+          if (syncCodexOverlayState('history-mode-wheel-up')) {
             clearCodexWheelPendingScroll();
             terminal?.focus();
             write(TERMINAL_PAGE_UP_SEQUENCE);
+            logCodexWheelDebug('page-transcript', { direction: 'up' });
           } else if (!codexWheelOverlayPendingRef.current) {
+            logCodexWheelDebug('fallback-to-transcript', {
+              source: 'history-mode-wheel-up',
+              snapshot,
+            });
+            restoreCodexRawOutputMode('history-mode-has-no-scrollback');
             openCodexTranscriptOverlay('history-mode-has-no-scrollback');
           }
         }
@@ -3306,11 +3501,10 @@ export function AgentTerminal({
 
       if (codexWheelAutoRawModeRef.current || !snapshot.atBottom) {
         clearCodexWheelPendingScroll();
-        if (snapshot.baseY > 0) {
-          scrollCodexViewport('down', 'history-mode');
-        } else if (syncCodexOverlayState('history-mode-wheel-down')) {
+        if (syncCodexOverlayState('history-mode-wheel-down')) {
           terminal?.focus();
           write(TERMINAL_PAGE_DOWN_SEQUENCE);
+          logCodexWheelDebug('page-transcript', { direction: 'down' });
         }
         event.preventDefault();
       }
@@ -3323,11 +3517,16 @@ export function AgentTerminal({
     };
   }, [
     clearCodexWheelPendingScroll,
+    detectCodexNativeScrollState,
     detectCodexTranscriptBottom,
     getCodexViewportSnapshot,
     isCodexAgent,
+    logCodexWheelDebug,
     openCodexTranscriptOverlay,
     resetCodexWheelState,
+    restoreCodexRawOutputMode,
+    scheduleCodexNativeScrollProbe,
+    scheduleCodexTranscriptExitConfirmation,
     scrollCodexViewport,
     syncCodexOverlayState,
     terminal,
