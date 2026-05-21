@@ -4,6 +4,7 @@ export * from './ai';
 export * from './app';
 export * from './claude';
 export * from './cli';
+export * from './clipboard';
 export * from './file';
 export * from './git';
 export * from './ipc';

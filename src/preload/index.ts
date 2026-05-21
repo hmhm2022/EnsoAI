@@ -1,10 +1,12 @@
 import { Buffer } from 'node:buffer';
 import os from 'node:os';
+import { pathToFileURL } from 'node:url';
 import 'electron-log/preload.js';
 import type { Locale } from '@shared/i18n';
 import type {
   AgentCliInfo,
   AgentMetadata,
+  ClipboardImageResult,
   CloneProgress,
   CloneResult,
   CommitFileChange,
@@ -382,6 +384,12 @@ const electronAPI = {
       ipcRenderer.on(IPC_CHANNELS.FILE_CHANGE, handler);
       return () => ipcRenderer.off(IPC_CHANNELS.FILE_CHANGE, handler);
     },
+  },
+
+  // Clipboard
+  clipboard: {
+    readImage: (): Promise<ClipboardImageResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLIPBOARD_READ_IMAGE),
   },
 
   // Terminal
@@ -1109,6 +1117,9 @@ const electronAPI = {
   utils: {
     getPathForFile: (file: File): string => {
       return webUtils.getPathForFile(file);
+    },
+    pathToFileUrl: (filePath: string): string => {
+      return pathToFileURL(filePath).href;
     },
   },
 };

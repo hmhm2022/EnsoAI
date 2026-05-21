@@ -132,6 +132,31 @@ const CODEX_WHEEL_EXIT_TRANSCRIPT_SEQUENCE = 'q';
 const CODEX_WHEEL_SCROLL_LINES = 3;
 const OPENCODE_WHEEL_STEP_THRESHOLD = 48;
 const OPENCODE_WHEEL_THROTTLE_MS = 90;
+const OPENCODE_PASTE_IMAGE_DELAY_MS = 30;
+
+function getImageExtensionFromMime(mime: string): string {
+  switch (mime.toLowerCase()) {
+    case 'image/png':
+      return 'png';
+    case 'image/jpeg':
+    case 'image/jpg':
+      return 'jpg';
+    case 'image/webp':
+      return 'webp';
+    case 'image/gif':
+      return 'gif';
+    case 'image/bmp':
+      return 'bmp';
+    case 'image/svg+xml':
+      return 'svg';
+    default:
+      return 'png';
+  }
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 type CodexTranscriptEntryKind =
   | 'user'
@@ -3529,10 +3554,179 @@ export function AgentTerminal({
     }
   }, [isActive, onFocus]);
 
+  const saveImageFileToTemp = useCallback(async (file: File): Promise<string | null> => {
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const buffer = new Uint8Array(arrayBuffer);
+      const timestamp = Date.now();
+      const random = Math.random().toString(36).slice(2, 8);
+      const extension = getImageExtensionFromMime(file.type || 'image/png');
+      const filename = `ensoai-opencode-${timestamp}-${random}.${extension}`;
+      const result = await window.electronAPI.file.saveToTemp(filename, buffer);
+      if (result.success && result.path) {
+        return result.path;
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const saveClipboardImageToTemp = useCallback(async (): Promise<string | null> => {
+    // Windows 下 DOM paste 可能拿不到图片，这里回退到 Electron 原生剪贴板。
+    const result = await window.electronAPI.clipboard.readImage();
+    if (!result.success) {
+      return null;
+    }
+
+    const extension = getImageExtensionFromMime(result.mime);
+    const filename = result.filename.endsWith(`.${extension}`)
+      ? result.filename
+      : `${result.filename}.${extension}`;
+    const saveResult = await window.electronAPI.file.saveToTemp(filename, result.data);
+    if (saveResult.success && saveResult.path) {
+      return saveResult.path;
+    }
+    return null;
+  }, []);
+
+  const pasteOpenCodeImagePaths = useCallback(
+    async (imagePaths: string[], submit = false) => {
+      if (!write || !terminalSessionId || imagePaths.length === 0) return;
+
+      for (const imagePath of imagePaths) {
+        const fileUrl = window.electronAPI.utils.pathToFileUrl(imagePath);
+        write(`\x1b[200~${fileUrl}\x1b[201~`);
+        await wait(OPENCODE_PASTE_IMAGE_DELAY_MS);
+      }
+
+      if (submit) {
+        write('\r');
+      }
+
+      terminal?.focus();
+    },
+    [write, terminalSessionId, terminal]
+  );
+
+  const shouldInterceptOpenCodePaste = useCallback(
+    (clipboardData: DataTransfer | null | undefined): boolean => {
+      if (!isOpenCodeAgent || !write || !terminalSessionId || !clipboardData) {
+        return false;
+      }
+
+      for (const item of Array.from(clipboardData.items)) {
+        if (item.type.startsWith('image/')) {
+          return true;
+        }
+      }
+
+      const plainText = clipboardData.getData('text/plain') ?? '';
+      if (plainText.trim()) {
+        return false;
+      }
+
+      // DOM 没给图片也没给文本时，交给原生剪贴板兜底。
+      return true;
+    },
+    [isOpenCodeAgent, write, terminalSessionId]
+  );
+
+  const processOpenCodeClipboardData = useCallback(
+    async (clipboardData: DataTransfer): Promise<void> => {
+      const imageFiles: File[] = [];
+      for (const item of Array.from(clipboardData.items)) {
+        if (!item.type.startsWith('image/')) continue;
+        const file = item.getAsFile();
+        if (file) {
+          imageFiles.push(file);
+        }
+      }
+
+      if (imageFiles.length > 0) {
+        const nextPaths: string[] = [];
+        for (const file of imageFiles) {
+          const path = await saveImageFileToTemp(file);
+          if (path) {
+            nextPaths.push(path);
+          }
+        }
+        if (nextPaths.length > 0) {
+          await pasteOpenCodeImagePaths(nextPaths, false);
+        }
+        return;
+      }
+
+      const plainText = clipboardData.getData('text/plain') ?? '';
+      if (plainText.trim()) {
+        return;
+      }
+
+      const clipboardImagePath = await saveClipboardImageToTemp();
+      if (clipboardImagePath) {
+        await pasteOpenCodeImagePaths([clipboardImagePath], false);
+      }
+    },
+    [saveImageFileToTemp, saveClipboardImageToTemp, pasteOpenCodeImagePaths]
+  );
+
+  const handleOpenCodeNativePaste = useCallback(
+    async (event: ClipboardEvent) => {
+      const clipboardData = event.clipboardData;
+      if (!shouldInterceptOpenCodePaste(clipboardData)) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      await processOpenCodeClipboardData(clipboardData);
+    },
+    [processOpenCodeClipboardData, shouldInterceptOpenCodePaste]
+  );
+
+  const handleOpenCodeEnhancedInputSend = useCallback(
+    async (content: string, imagePaths: string[]) => {
+      if (!write || !terminalSessionId) return;
+
+      const trimmed = content.trim();
+      if (trimmed) {
+        const hasInternalNewlines = trimmed.includes('\n');
+        if (hasInternalNewlines) {
+          write(`\x1b[200~${trimmed}\x1b[201~`);
+        } else {
+          write(trimmed);
+        }
+      }
+
+      if (imagePaths.length > 0) {
+        // 保持单回合语义：先把文字和图片都放进当前 prompt，再统一提交一次。
+        if (trimmed) {
+          write(' ');
+        }
+        await pasteOpenCodeImagePaths(imagePaths, false);
+        write('\r');
+        terminal?.focus();
+        return;
+      }
+
+      if (trimmed) {
+        const delay = trimmed.includes('\n') ? 300 : 30;
+        setTimeout(() => write('\r'), delay);
+      }
+      terminal?.focus();
+    },
+    [pasteOpenCodeImagePaths, write, terminalSessionId, terminal]
+  );
+
   // Handle enhanced input send
   const handleEnhancedInputSend = useCallback(
     async (content: string, imagePaths: string[]) => {
       if (!write || !terminalSessionId) return;
+
+      if (isOpenCodeAgent) {
+        await handleOpenCodeEnhancedInputSend(content, imagePaths);
+        return;
+      }
 
       let message = content;
 
@@ -3562,7 +3756,14 @@ export function AgentTerminal({
 
       terminal?.focus();
     },
-    [isCodexAgent, write, terminalSessionId, terminal]
+    [
+      handleOpenCodeEnhancedInputSend,
+      isCodexAgent,
+      isOpenCodeAgent,
+      write,
+      terminalSessionId,
+      terminal,
+    ]
   );
 
   useEffect(() => {
@@ -3577,6 +3778,22 @@ export function AgentTerminal({
     onRegisterEnhancedInputSender,
     onUnregisterEnhancedInputSender,
   ]);
+
+  useEffect(() => {
+    const textarea = terminal?.textarea;
+    if (!textarea || !isOpenCodeAgent) {
+      return;
+    }
+
+    const handlePaste = (event: ClipboardEvent) => {
+      void handleOpenCodeNativePaste(event);
+    };
+
+    textarea.addEventListener('paste', handlePaste, true);
+    return () => {
+      textarea.removeEventListener('paste', handlePaste, true);
+    };
+  }, [terminal, isOpenCodeAgent, handleOpenCodeNativePaste]);
 
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: click is for focus activation

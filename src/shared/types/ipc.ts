@@ -97,6 +97,9 @@ export const IPC_CHANNELS = {
   FILE_WATCH_STOP: 'file:watch:stop',
   FILE_CHANGE: 'file:change',
 
+  // Clipboard
+  CLIPBOARD_READ_IMAGE: 'clipboard:read-image',
+
   // Terminal
   TERMINAL_CREATE: 'terminal:create',
   TERMINAL_WRITE: 'terminal:write',

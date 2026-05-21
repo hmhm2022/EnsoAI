@@ -12,6 +12,7 @@ import {
 import { registerClaudeConfigHandlers } from './claudeConfig';
 import { registerClaudeProviderHandlers } from './claudeProvider';
 import { registerCliHandlers } from './cli';
+import { registerClipboardHandlers } from './clipboard';
 import { registerDialogHandlers } from './dialog';
 import {
   cleanupTempFiles,
@@ -46,6 +47,7 @@ export function registerIpcHandlers(): void {
   registerGitHandlers();
   registerWorktreeHandlers();
   registerFileHandlers();
+  registerClipboardHandlers();
   registerTerminalHandlers();
   registerAgentHandlers();
   registerDialogHandlers();
