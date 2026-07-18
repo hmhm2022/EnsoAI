@@ -12,6 +12,7 @@ import {
 import { registerClaudeConfigHandlers } from './claudeConfig';
 import { registerClaudeProviderHandlers } from './claudeProvider';
 import { registerCliHandlers } from './cli';
+import { registerCodexHistoryHandlers } from './codexHistory';
 import { registerDialogHandlers } from './dialog';
 import {
   cleanupTempFiles,
@@ -48,6 +49,7 @@ export function registerIpcHandlers(): void {
   registerFileHandlers();
   registerTerminalHandlers();
   registerAgentHandlers();
+  registerCodexHistoryHandlers();
   registerDialogHandlers();
   registerAppHandlers();
   registerCliHandlers();

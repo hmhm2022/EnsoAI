@@ -7,6 +7,12 @@ import type {
   AgentMetadata,
   CloneProgress,
   CloneResult,
+  CodexHistoryQuery,
+  CodexHistoryResult,
+  CodexLatestSessionQuery,
+  CodexLatestSessionResult,
+  CodexSessionListQuery,
+  CodexSessionListResult,
   CommitFileChange,
   ConflictResolution,
   ContentSearchParams,
@@ -54,10 +60,14 @@ import type {
 import { IPC_CHANNELS } from '@shared/types';
 import type { AgentStopNotificationData } from '@shared/types/agent';
 import type { InspectPayload, WebInspectorStatus } from '@shared/types/webInspector';
-import { contextBridge, ipcRenderer, shell, webUtils } from 'electron';
+import { clipboard, contextBridge, ipcRenderer, shell, webUtils } from 'electron';
 import pkg from '../../package.json';
 
 const electronAPI = {
+  clipboard: {
+    writeText: (text: string): void => clipboard.writeText(text),
+  },
+
   // Git
   git: {
     getStatus: (workdir: string): Promise<GitStatus> =>
@@ -179,10 +189,10 @@ const electronAPI = {
         effortLevel?: string;
         reviewId: string;
         language?: string;
-        sessionId?: string; // Restore this parameter for "Continue Conversation"
+        sessionId?: string; // Optional review session token for providers that still support "Continue Conversation"
         prompt?: string; // Custom prompt template
       }
-    ): Promise<{ success: boolean; error?: string; sessionId?: string }> =>
+    ): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.GIT_CODE_REVIEW_START, workdir, options),
     stopCodeReview: (reviewId: string): Promise<void> =>
       ipcRenderer.invoke(IPC_CHANNELS.GIT_CODE_REVIEW_STOP, reviewId),
@@ -419,6 +429,16 @@ const electronAPI = {
   // Agent
   agent: {
     list: (): Promise<AgentMetadata[]> => ipcRenderer.invoke(IPC_CHANNELS.AGENT_LIST),
+  },
+
+  // Codex History
+  codexHistory: {
+    get: (query: CodexHistoryQuery): Promise<CodexHistoryResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CODEX_HISTORY_GET, query),
+    findLatest: (query: CodexLatestSessionQuery): Promise<CodexLatestSessionResult | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CODEX_HISTORY_FIND_LATEST, query),
+    listSessions: (query: CodexSessionListQuery): Promise<CodexSessionListResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CODEX_HISTORY_LIST_SESSIONS, query),
   },
 
   // App

@@ -115,6 +115,11 @@ export const IPC_CHANNELS = {
   AGENT_USER_PROMPT_NOTIFICATION: 'agent:userPrompt:notification',
   AGENT_STATUS_UPDATE: 'agent:status:update',
 
+  // Codex History
+  CODEX_HISTORY_GET: 'codex-history:get',
+  CODEX_HISTORY_FIND_LATEST: 'codex-history:findLatest',
+  CODEX_HISTORY_LIST_SESSIONS: 'codex-history:listSessions',
+
   // App
   APP_GET_PATH: 'app:getPath',
   APP_UPDATE_AVAILABLE: 'app:updateAvailable',
