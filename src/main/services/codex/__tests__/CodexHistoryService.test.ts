@@ -1,8 +1,19 @@
+import { existsSync } from 'node:fs';
 import { mkdir, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
-import { findLatestCodexSession, getCodexHistory, listCodexSessions } from '../CodexHistoryService';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  cleanupCodexHistoryIndex,
+  findLatestCodexSession,
+  getCodexHistory,
+  initializeCodexHistoryIndex,
+  listCodexSessions,
+} from '../CodexHistoryService';
+
+const electronApp = vi.hoisted(() => ({ getPath: vi.fn() }));
+
+vi.mock('electron', () => ({ app: electronApp }));
 
 async function createSessionFile(root: string, filename: string, content: string): Promise<string> {
   const dir = path.join(root, '2026', '07', '17');
@@ -13,6 +24,129 @@ async function createSessionFile(root: string, filename: string, content: string
 }
 
 describe('CodexHistoryService', () => {
+  afterEach(async () => {
+    await cleanupCodexHistoryIndex();
+    electronApp.getPath.mockReset();
+  });
+
+  it('stores the default index database under Electron userData instead of Codex sessions', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-default-index-${Date.now()}`);
+    const userDataPath = path.join(root, 'user-data');
+    const sessionsRoot = path.join(root, '.codex', 'sessions');
+    const expectedDbPath = path.join(userDataPath, 'codex-history-index.db');
+    electronApp.getPath.mockReturnValue(userDataPath);
+
+    await initializeCodexHistoryIndex({ sessionsRoot });
+
+    expect(electronApp.getPath).toHaveBeenCalledWith('userData');
+    expect(existsSync(expectedDbPath)).toBe(true);
+    expect(path.relative(sessionsRoot, expectedDbPath).startsWith('..')).toBe(true);
+    expect(path.relative(path.join(root, '.codex'), expectedDbPath).startsWith('..')).toBe(true);
+  });
+
+  it('returns sessions from an initialized and populated index', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-index-list-${Date.now()}`);
+    const sessionId = '01996abf-bc87-7e80-9909-3a86a414f7e8';
+    const filePath = await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      [
+        JSON.stringify({
+          type: 'session_meta',
+          payload: { cwd: 'D:/work/current', model_provider: 'openai' },
+        }),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5' } }),
+      ].join('\n')
+    );
+
+    await initializeCodexHistoryIndex({
+      dbPath: path.join(root, 'index.db'),
+      sessionsRoot: root,
+    });
+    await listCodexSessions({ cwd: 'D:/work/current', sessionsRoot: root });
+
+    const result = await listCodexSessions({ sessionsRoot: path.join(root, 'missing') });
+
+    expect(result.sessions).toEqual([
+      expect.objectContaining({
+        sessionId,
+        filePath,
+        cwd: 'D:/work/current',
+        model: 'gpt-5',
+        modelProvider: 'openai',
+      }),
+    ]);
+  });
+
+  it('finds indexed sessions using every stored cwd value', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-index-cwd-${Date.now()}`);
+    const sessionId = '11996abf-bc87-7e80-9909-3a86a414f7e8';
+    await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      [
+        JSON.stringify({ type: 'session_meta', payload: { cwd: 'D:/work/first' } }),
+        JSON.stringify({ type: 'turn_context', cwd: 'D:/work/second' }),
+      ].join('\n')
+    );
+
+    await initializeCodexHistoryIndex({
+      dbPath: path.join(root, 'index.db'),
+      sessionsRoot: root,
+    });
+
+    const result = await listCodexSessions({
+      cwd: 'D:\\work\\second',
+      sessionsRoot: path.join(root, 'missing'),
+    });
+
+    expect(result.sessions.map((session) => session.sessionId)).toEqual([sessionId]);
+  });
+
+  it('reads an indexed session file without scanning other session files', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-index-history-${Date.now()}`);
+    const sessionId = '21996abf-bc87-7e80-9909-3a86a414f7e8';
+    const filePath = await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      JSON.stringify({ role: 'user', content: 'indexed message' })
+    );
+
+    await initializeCodexHistoryIndex({
+      dbPath: path.join(root, 'index.db'),
+      sessionsRoot: root,
+    });
+    await findLatestCodexSession({ sessionsRoot: root });
+
+    const result = await getCodexHistory({
+      sessionId,
+      sessionsRoot: path.join(root, 'missing'),
+    });
+
+    expect(result.filePath).toBe(filePath);
+    expect(result.messages[0]?.text).toBe('indexed message');
+  });
+
+  it('runs a recent cwd scan while the initial index scan is incomplete', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-recent-scan-${Date.now()}`);
+    const cwd = 'D:/work/current';
+    const sessionId = '31996abf-bc87-7e80-9909-3a86a414f7e8';
+    await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      JSON.stringify({ type: 'session_meta', payload: { cwd } })
+    );
+
+    await initializeCodexHistoryIndex({
+      dbPath: path.join(root, 'index.db'),
+      sessionsRoot: root,
+    });
+
+    const result = await listCodexSessions({ cwd, sessionsRoot: root });
+
+    expect(result.sessions.map((session) => session.sessionId)).toEqual([sessionId]);
+  });
+
   it('loads history by session id', async () => {
     const root = path.join(os.tmpdir(), `enso-codex-history-${Date.now()}`);
     await mkdir(root, { recursive: true });
@@ -27,6 +161,35 @@ describe('CodexHistoryService', () => {
 
     expect(result.sessionId).toBe(sessionId);
     expect(result.messages[0]?.text).toBe('first message');
+  });
+
+  it('loads a session found by metadata id when the filename has no id', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-metadata-id-${Date.now()}`);
+    const sessionId = '01996abf-bc87-7e80-9909-3a86a414f7e8';
+    const filePath = await createSessionFile(
+      root,
+      'manual.jsonl',
+      [
+        JSON.stringify({
+          type: 'session_meta',
+          payload: {
+            id: sessionId,
+            cwd: 'D:/work/current',
+            timestamp: '2026-07-17T10:00:00.000Z',
+          },
+        }),
+        JSON.stringify({ role: 'user', content: 'metadata session message' }),
+      ].join('\n')
+    );
+
+    const listed = await listCodexSessions({ sessionsRoot: root });
+    const latest = await findLatestCodexSession({ sessionsRoot: root, startedAfter: 0 });
+    const result = await getCodexHistory({ sessionId, maxMessages: 10, sessionsRoot: root });
+
+    expect(listed.sessions[0]?.sessionId).toBe(sessionId);
+    expect(latest).toEqual({ sessionId, filePath });
+    expect(result.filePath).toBe(filePath);
+    expect(result.messages[0]?.text).toBe('metadata session message');
   });
 
   it('finds latest session after a timestamp', async () => {
@@ -149,8 +312,13 @@ describe('CodexHistoryService', () => {
       [
         JSON.stringify({
           type: 'session_meta',
-          payload: { cwd: expectedCwd, timestamp: '2026-07-17T10:00:01.000Z' },
+          payload: {
+            cwd: expectedCwd,
+            timestamp: '2026-07-17T10:00:01.000Z',
+            model_provider: 'openai',
+          },
         }),
+        JSON.stringify({ type: 'turn_context', payload: { model: 'gpt-5' } }),
         JSON.stringify({
           type: 'response_item',
           payload: {
@@ -194,5 +362,7 @@ describe('CodexHistoryService', () => {
     expect(result.sessions[0]?.title).toBe('Review the current code changes');
     expect(result.sessions[1]?.title).toBe('Older real task title');
     expect(result.sessions[0]?.timestamp).toBe('2026-07-17T10:00:01.000Z');
+    expect(result.sessions[0]?.model).toBe('gpt-5');
+    expect(result.sessions[0]?.modelProvider).toBe('openai');
   });
 });

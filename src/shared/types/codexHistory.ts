@@ -32,10 +32,12 @@ export interface CodexSessionListQuery {
 export interface CodexSessionListItem {
   sessionId: string;
   filePath: string;
+  modifiedAt: number;
   cwd?: string;
   title?: string;
   timestamp?: string;
-  modifiedAt: number;
+  model?: string;
+  modelProvider?: string;
 }
 
 export interface CodexSessionListResult {
