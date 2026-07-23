@@ -9,6 +9,7 @@ import { useTerminalScrollToBottom } from '@/hooks/useTerminalScrollToBottom';
 import { useXterm } from '@/hooks/useXterm';
 import { useI18n } from '@/i18n';
 import { buildAgentCliInvocation } from '@/lib/agentCommand';
+import { resolveTerminalNewline } from '@/lib/terminalNewline';
 import { type OutputState, useAgentSessionsStore } from '@/stores/agentSessions';
 import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -656,15 +657,14 @@ export function AgentTerminal({
     [onTerminalTitleChange]
   );
 
-  // Handle Shift+Enter for newline (Ctrl+J / LF for all agents)
-  // Also detect Enter key press to mark session as activated
+  // Handle Shift+Enter for newline and detect Enter key press to mark the session as activated.
   // biome-ignore lint/correctness/useExhaustiveDependencies: terminal is accessed via try-catch for safety and defined after this callback
   const handleCustomKey = useCallback(
     (event: KeyboardEvent, ptyId: string, getCurrentLine?: () => string | null) => {
-      // Handle Shift+Enter for newline - must be before keydown check to block both keydown and keypress
-      if (event.key === 'Enter' && event.shiftKey) {
-        if (event.type === 'keydown') {
-          window.electronAPI.terminal.write(ptyId, '\x0a');
+      const newline = resolveTerminalNewline(event, agentCommand === 'codex');
+      if (newline.handled) {
+        if (newline.data !== null) {
+          window.electronAPI.terminal.write(ptyId, newline.data);
         }
         return false;
       }
@@ -784,6 +784,7 @@ export function AgentTerminal({
       cwd,
       setActivityState,
       agentId,
+      agentCommand,
       claudeCodeIntegration.enhancedInputEnabled,
       enhancedInputOpen,
       setEnhancedInputOpen,
