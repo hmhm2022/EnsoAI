@@ -109,6 +109,27 @@ export async function initializeCodexHistoryIndex(
   }
 }
 
+interface InitialScanWatcher {
+  start(options: { paused: boolean }): Promise<void>;
+  resume(): void;
+}
+
+interface InitialScanIndexer {
+  runFullScan(): Promise<void>;
+}
+
+export async function runCodexHistoryInitialScan(
+  watcher: InitialScanWatcher,
+  activeIndexer: InitialScanIndexer
+): Promise<void> {
+  await watcher.start({ paused: true });
+  try {
+    await activeIndexer.runFullScan();
+  } finally {
+    watcher.resume();
+  }
+}
+
 export async function startCodexHistoryBackgroundIndexing(): Promise<void> {
   if (!hasUsableIndex() || backgroundStarted || !indexer || !indexWatcher) return;
   if (backgroundStarting) return backgroundStarting;
@@ -117,21 +138,13 @@ export async function startCodexHistoryBackgroundIndexing(): Promise<void> {
   const activeIndexer = indexer;
   const startPromise = Promise.resolve().then(async () => {
     try {
-      try {
-        // 监听就绪后再扫描，避免扫描期间新增的会话文件遗漏索引。
-        await watcher.start();
-      } catch (error) {
-        console.error('[CodexHistoryService] 后台会话监听启动失败：', error);
-        return;
-      }
-
-      try {
-        if (indexWatcher !== watcher || indexer !== activeIndexer || !hasUsableIndex()) return;
+      if (indexWatcher !== watcher || indexer !== activeIndexer || !hasUsableIndex()) return;
+      await runCodexHistoryInitialScan(watcher, activeIndexer);
+      if (indexWatcher === watcher && indexer === activeIndexer && hasUsableIndex()) {
         backgroundStarted = true;
-        await activeIndexer.runFullScan();
-      } catch (error) {
-        console.error('[CodexHistoryService] 后台全量索引失败：', error);
       }
+    } catch (error) {
+      console.error('[CodexHistoryService] 后台会话索引启动失败：', error);
     } finally {
       if (backgroundStarting === startPromise) backgroundStarting = null;
     }

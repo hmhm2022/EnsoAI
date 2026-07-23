@@ -49,7 +49,7 @@ describe('CodexHistoryParser', () => {
         payload: {
           type: 'message',
           role: 'user',
-          content: [{ type: 'input_text', text: '# AGENTS.md instructions for D:/work/current' }],
+          content: [{ type: 'input_text', text: '# AGENTS.md instructions\n<INSTRUCTIONS>' }],
         },
       }),
       JSON.stringify({

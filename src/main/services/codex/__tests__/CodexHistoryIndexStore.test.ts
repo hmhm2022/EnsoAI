@@ -136,4 +136,50 @@ describe('CodexHistoryIndexStore', () => {
     await expect(store.getState('initial_scan_completed')).resolves.toBe('true');
     await expect(store.getState('missing')).resolves.toBeNull();
   });
+
+  it('serializes concurrent transactions on one database connection', async () => {
+    const store = await createStore();
+    const records = Array.from({ length: 12 }, (_, index) =>
+      createRecord({
+        sessionId: `${String(index).padStart(8, '0')}-bc87-7e80-9909-3a86a414f7e8`,
+        filePath: `D:/codex/session-${index}.jsonl`,
+        cwdNormalizedValues: [`d:/work/${index}`],
+      })
+    );
+
+    await expect(
+      Promise.all(records.map((record) => store.upsertSession(record)))
+    ).resolves.toEqual(records.map(() => undefined));
+
+    await expect(store.listSessions({ maxSessions: 20 })).resolves.toHaveLength(12);
+  });
+
+  it('continues queued writes after one write is rejected', async () => {
+    const store = await createStore();
+    const invalidRecord = createRecord({
+      sessionId: 'invalid-record',
+      filePath: null as unknown as string,
+    });
+    const validRecord = createRecord({
+      sessionId: '21996abf-bc87-7e80-9909-3a86a414f7e8',
+      filePath: 'D:/codex/recovered.jsonl',
+    });
+
+    await expect(store.upsertSession(invalidRecord)).rejects.toThrow();
+    await expect(store.upsertSession(validRecord)).resolves.toBeUndefined();
+    await expect(store.getSessionFilePath(validRecord.sessionId)).resolves.toBe(
+      validRecord.filePath
+    );
+  });
+
+  it('returns indexed file size and mtime by file path', async () => {
+    const store = await createStore();
+    const record = createRecord({ fileMtimeMs: 2345, fileSize: 6789 });
+
+    await store.upsertSession(record);
+
+    await expect(store.getFileFingerprints()).resolves.toEqual(
+      new Map([[record.filePath, { fileMtimeMs: record.fileMtimeMs, fileSize: record.fileSize }]])
+    );
+  });
 });

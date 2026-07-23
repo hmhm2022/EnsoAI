@@ -128,6 +128,58 @@ describe('CodexHistoryWatcher', () => {
     expect(stopped).toBe(true);
   });
 
+  it('buffers file events while paused and flushes each path after resume', async () => {
+    vi.useFakeTimers();
+    const fixture = createWatcher();
+    await fixture.watcher.start({ paused: true });
+
+    fixture.emit('update', '/sessions/one.jsonl');
+    fixture.emit('update', '/sessions/one.jsonl');
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fixture.indexer.indexFile).not.toHaveBeenCalled();
+
+    fixture.watcher.resume();
+    await vi.runAllTimersAsync();
+    expect(fixture.indexer.indexFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs at most one index call and one follow-up for updates during a write', async () => {
+    vi.useFakeTimers();
+    const fixture = createWatcher();
+    const resolvers: Array<() => void> = [];
+    let active = 0;
+    let maxActive = 0;
+    fixture.indexer.indexFile.mockImplementation(
+      () =>
+        new Promise<null>((resolve) => {
+          active += 1;
+          maxActive = Math.max(maxActive, active);
+          resolvers.push(() => {
+            active -= 1;
+            resolve(null);
+          });
+        })
+    );
+    await fixture.watcher.start();
+
+    fixture.emit('update', '/sessions/active.jsonl');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(fixture.indexer.indexFile).toHaveBeenCalledTimes(1);
+
+    fixture.emit('update', '/sessions/active.jsonl');
+    fixture.emit('update', '/sessions/active.jsonl');
+    await vi.advanceTimersByTimeAsync(300);
+    expect(fixture.indexer.indexFile).toHaveBeenCalledTimes(1);
+
+    resolvers.shift()?.();
+    await vi.runAllTimersAsync();
+    expect(fixture.indexer.indexFile).toHaveBeenCalledTimes(2);
+    expect(maxActive).toBe(1);
+
+    resolvers.shift()?.();
+    await Promise.resolve();
+  });
+
   it('allows another start after the underlying watcher fails', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const firstStart = vi.fn<() => Promise<void>>().mockRejectedValue(new Error('unavailable'));

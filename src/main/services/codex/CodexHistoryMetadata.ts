@@ -1,9 +1,11 @@
-import type { Stats } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { createReadStream, type Stats } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
+import { createInterface } from 'node:readline';
 import { extractCodexSessionIdFromPath } from './CodexHistoryParser';
 
 const SESSION_TITLE_MAX_LENGTH = 160;
+const YIELD_AFTER_LINES = 200;
 
 export interface ParseCodexSessionMetadataInput {
   filePath: string;
@@ -103,7 +105,7 @@ function normalizeSessionTitle(text: string): string {
 
 function isGeneratedUserText(text: string): boolean {
   return (
-    text.startsWith('# AGENTS.md instructions for') ||
+    text.startsWith('# AGENTS.md instructions') ||
     text.startsWith('<environment_context>') ||
     text.startsWith('<turn_aborted>') ||
     text.startsWith('<user_action>')
@@ -149,44 +151,50 @@ function uniqueValues(values: string[]): string[] {
   return [...new Set(values)];
 }
 
-export function parseCodexSessionMetadata({
-  filePath,
-  content,
-  fileStat,
-}: ParseCodexSessionMetadataInput): CodexSessionMetadata | null {
-  const cwdValues: string[] = [];
-  let metadataSessionId: string | undefined;
-  let timestamp: string | undefined;
-  let title: string | undefined;
-  let model: string | undefined;
-  let modelProvider: string | undefined;
+interface CodexSessionMetadataAccumulator {
+  cwdValues: string[];
+  metadataSessionId?: string;
+  timestamp?: string;
+  title?: string;
+  model?: string;
+  modelProvider?: string;
+}
 
-  for (const line of content.split(/\r?\n/)) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
+function createMetadataAccumulator(): CodexSessionMetadataAccumulator {
+  return { cwdValues: [] };
+}
 
-    try {
-      const record = asRecord(JSON.parse(trimmed) as unknown);
-      if (!record) continue;
+function consumeMetadataLine(accumulator: CodexSessionMetadataAccumulator, line: string): void {
+  const trimmed = line.trim();
+  if (!trimmed) return;
 
-      cwdValues.push(...extractCwdValues(record));
-      metadataSessionId ??= extractMetadataSessionId(record);
-      timestamp ??= extractFirstString(record, ['timestamp']);
-      model ??= extractFirstString(record, ['model']);
-      modelProvider ??= extractFirstString(record, ['model_provider', 'modelProvider']);
-      title ??= extractTitleValue(record);
-    } catch {
-      // Codex jsonl 里可能存在不完整行，这里只跳过坏行。
-    }
+  try {
+    const record = asRecord(JSON.parse(trimmed) as unknown);
+    if (!record) return;
+
+    accumulator.cwdValues.push(...extractCwdValues(record));
+    accumulator.metadataSessionId ??= extractMetadataSessionId(record);
+    accumulator.timestamp ??= extractFirstString(record, ['timestamp']);
+    accumulator.model ??= extractFirstString(record, ['model']);
+    accumulator.modelProvider ??= extractFirstString(record, ['model_provider', 'modelProvider']);
+    accumulator.title ??= extractTitleValue(record);
+  } catch {
+    // Codex jsonl 里可能存在不完整行，这里只跳过坏行。
   }
+}
 
-  const sessionId = extractCodexSessionIdFromPath(filePath) ?? metadataSessionId;
+function buildCodexSessionMetadata(
+  filePath: string,
+  fileStat: Pick<Stats, 'birthtimeMs' | 'ctimeMs' | 'mtimeMs' | 'size'>,
+  accumulator: CodexSessionMetadataAccumulator
+): CodexSessionMetadata | null {
+  const sessionId = extractCodexSessionIdFromPath(filePath) ?? accumulator.metadataSessionId;
   if (!sessionId) return null;
 
-  const uniqueCwdValues = uniqueValues(cwdValues);
-  const cwdNormalizedValues = uniqueValues(uniqueCwdValues.map(normalizeCwd));
+  const cwdValues = uniqueValues(accumulator.cwdValues);
+  const cwdNormalizedValues = uniqueValues(cwdValues.map(normalizeCwd));
   const createdAtMs =
-    parseTimestampMs(timestamp) ??
+    parseTimestampMs(accumulator.timestamp) ??
     extractCreatedAtMsFromRolloutPath(filePath) ??
     fileStat.birthtimeMs ??
     fileStat.ctimeMs;
@@ -194,24 +202,77 @@ export function parseCodexSessionMetadata({
   const metadata: CodexSessionMetadata = {
     sessionId,
     filePath,
-    cwdValues: uniqueCwdValues,
+    cwdValues,
     cwdNormalizedValues,
     createdAtMs,
     modifiedAtMs: fileStat.mtimeMs,
     fileMtimeMs: fileStat.mtimeMs,
     fileSize: fileStat.size,
   };
-  if (uniqueCwdValues[0]) metadata.cwd = uniqueCwdValues[0];
-  if (title) metadata.title = title;
-  if (timestamp) metadata.timestamp = timestamp;
-  if (model) metadata.model = model;
-  if (modelProvider) metadata.modelProvider = modelProvider;
+  if (cwdValues[0]) metadata.cwd = cwdValues[0];
+  if (accumulator.title) metadata.title = accumulator.title;
+  if (accumulator.timestamp) metadata.timestamp = accumulator.timestamp;
+  if (accumulator.model) metadata.model = accumulator.model;
+  if (accumulator.modelProvider) metadata.modelProvider = accumulator.modelProvider;
   return metadata;
+}
+
+export function parseCodexSessionMetadata({
+  filePath,
+  content,
+  fileStat,
+}: ParseCodexSessionMetadataInput): CodexSessionMetadata | null {
+  const accumulator = createMetadataAccumulator();
+
+  for (const line of content.split(/\r?\n/)) {
+    consumeMetadataLine(accumulator, line);
+  }
+
+  return buildCodexSessionMetadata(filePath, fileStat, accumulator);
+}
+
+interface MetadataSnapshotResult {
+  metadata: CodexSessionMetadata | null;
+  changedDuringRead: boolean;
+}
+
+function yieldToMainProcess(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function readMetadataSnapshot(filePath: string): Promise<MetadataSnapshotResult> {
+  const fileStat = await stat(filePath);
+  const accumulator = createMetadataAccumulator();
+
+  if (fileStat.size > 0) {
+    const input = createReadStream(filePath, {
+      encoding: 'utf8',
+      end: fileStat.size - 1,
+    });
+    const lines = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY });
+    let lineCount = 0;
+    try {
+      for await (const line of lines) {
+        consumeMetadataLine(accumulator, line);
+        lineCount += 1;
+        if (lineCount % YIELD_AFTER_LINES === 0) await yieldToMainProcess();
+      }
+    } finally {
+      lines.close();
+    }
+  }
+
+  const afterRead = await stat(filePath);
+  return {
+    metadata: buildCodexSessionMetadata(filePath, fileStat, accumulator),
+    changedDuringRead: afterRead.size !== fileStat.size || afterRead.mtimeMs !== fileStat.mtimeMs,
+  };
 }
 
 export async function readCodexSessionMetadata(
   filePath: string
 ): Promise<CodexSessionMetadata | null> {
-  const [content, fileStat] = await Promise.all([readFile(filePath, 'utf8'), stat(filePath)]);
-  return parseCodexSessionMetadata({ filePath, content, fileStat });
+  let snapshot = await readMetadataSnapshot(filePath);
+  if (snapshot.changedDuringRead) snapshot = await readMetadataSnapshot(filePath);
+  return snapshot.metadata;
 }

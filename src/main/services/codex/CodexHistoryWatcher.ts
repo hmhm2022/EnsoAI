@@ -25,6 +25,10 @@ interface CodexHistoryWatcherOptions {
   fileWatcherFactory?: CodexHistoryWatcherFactory;
 }
 
+export interface CodexHistoryWatcherStartOptions {
+  paused?: boolean;
+}
+
 const DEFAULT_DEBOUNCE_MS = 300;
 
 export class CodexHistoryWatcher {
@@ -33,6 +37,9 @@ export class CodexHistoryWatcher {
   private pendingEvents = new Map<string, CodexHistoryEventType>();
   private pendingTimers = new Map<string, NodeJS.Timeout>();
   private pendingWrites = new Set<Promise<void>>();
+  private processingPaused = false;
+  private runningPaths = new Set<string>();
+  private rerunEvents = new Map<string, CodexHistoryEventType>();
   private watcher: CodexHistoryWatcherSubscription | null = null;
   private stopped = true;
 
@@ -47,10 +54,11 @@ export class CodexHistoryWatcher {
       options.fileWatcherFactory ?? ((directory, callback) => new FileWatcher(directory, callback));
   }
 
-  async start(): Promise<void> {
+  async start(options: CodexHistoryWatcherStartOptions = {}): Promise<void> {
     if (!this.stopped) return;
 
     this.stopped = false;
+    this.processingPaused = options.paused ?? false;
     const watcher = this.fileWatcherFactory(this.sessionsRoot, this.handleFileChange);
     this.watcher = watcher;
 
@@ -64,6 +72,12 @@ export class CodexHistoryWatcher {
       }
       throw error;
     }
+  }
+
+  resume(): void {
+    if (this.stopped || !this.processingPaused) return;
+    this.processingPaused = false;
+    for (const filePath of this.pendingEvents.keys()) this.scheduleFlush(filePath, 0);
   }
 
   async stop(): Promise<void> {
@@ -97,34 +111,63 @@ export class CodexHistoryWatcher {
     for (const timer of this.pendingTimers.values()) clearTimeout(timer);
     this.pendingTimers.clear();
     this.pendingEvents.clear();
+    this.rerunEvents.clear();
+  }
+
+  private mergeEvent(
+    events: Map<string, CodexHistoryEventType>,
+    type: CodexHistoryEventType,
+    filePath: string
+  ): void {
+    if (events.get(filePath) === 'delete') return;
+    events.set(filePath, type);
   }
 
   private handleFileChange = (type: CodexHistoryEventType, filePath: string): void => {
     if (this.stopped || !filePath.endsWith('.jsonl')) return;
 
     // 删除事件优先，避免同一批通知又把已删除的记录重新写入索引。
-    if (this.pendingEvents.get(filePath) !== 'delete') {
-      this.pendingEvents.set(filePath, type);
-    }
+    this.mergeEvent(this.pendingEvents, type, filePath);
+    if (this.processingPaused) return;
+    this.scheduleFlush(filePath);
+  };
 
+  private scheduleFlush(filePath: string, delayMs = this.debounceMs): void {
     const existingTimer = this.pendingTimers.get(filePath);
     if (existingTimer) clearTimeout(existingTimer);
     this.pendingTimers.set(
       filePath,
-      setTimeout(() => this.flushEvent(filePath), this.debounceMs)
+      setTimeout(() => this.flushEvent(filePath), delayMs)
     );
-  };
+  }
 
   private flushEvent(filePath: string): void {
     const type = this.pendingEvents.get(filePath);
     this.pendingEvents.delete(filePath);
     this.pendingTimers.delete(filePath);
     if (!type || this.stopped) return;
+    if (this.processingPaused) {
+      this.mergeEvent(this.pendingEvents, type, filePath);
+      return;
+    }
+    if (this.runningPaths.has(filePath)) {
+      this.mergeEvent(this.rerunEvents, type, filePath);
+      return;
+    }
+    this.startWrite(type, filePath);
+  }
 
-    // 文件写入常会产生多次通知，延后后只按最终事件更新索引。
+  private startWrite(type: CodexHistoryEventType, filePath: string): void {
+    this.runningPaths.add(filePath);
     let write: Promise<void>;
     write = this.applyEvent(type, filePath).finally(() => {
       this.pendingWrites.delete(write);
+      this.runningPaths.delete(filePath);
+      const rerunType = this.rerunEvents.get(filePath);
+      this.rerunEvents.delete(filePath);
+      if (!rerunType || this.stopped) return;
+      this.mergeEvent(this.pendingEvents, rerunType, filePath);
+      if (!this.processingPaused) this.scheduleFlush(filePath, 0);
     });
     this.pendingWrites.add(write);
   }

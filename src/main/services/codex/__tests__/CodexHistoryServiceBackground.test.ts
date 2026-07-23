@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   indexers: [] as Array<{ runFullScan: ReturnType<typeof vi.fn> }>,
-  watchers: [] as Array<{ start: ReturnType<typeof vi.fn> }>,
+  watchers: [] as Array<{
+    start: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+  }>,
 }));
 
 vi.mock('electron', () => ({ app: { getPath: vi.fn(() => '/user-data') } }));
@@ -20,6 +23,7 @@ vi.mock('../CodexHistoryIndexer', () => ({
 vi.mock('../CodexHistoryWatcher', () => ({
   CodexHistoryWatcher: class {
     start = vi.fn<() => Promise<void>>().mockResolvedValue();
+    resume = vi.fn<() => void>();
 
     constructor() {
       mocks.watchers.push(this);
@@ -61,6 +65,7 @@ describe('CodexHistoryService background indexing', () => {
     await start;
 
     expect(watcher.start).toHaveBeenCalledBefore(indexer.runFullScan);
+    expect(watcher.resume).toHaveBeenCalledAfter(indexer.runFullScan);
   });
 
   it('allows a retry after the watcher fails to start', async () => {
@@ -79,5 +84,6 @@ describe('CodexHistoryService background indexing', () => {
 
     expect(watcher.start).toHaveBeenCalledTimes(2);
     expect(indexer.runFullScan).toHaveBeenCalledTimes(1);
+    expect(watcher.resume).toHaveBeenCalledOnce();
   });
 });

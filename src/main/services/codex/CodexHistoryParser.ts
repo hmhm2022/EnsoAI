@@ -67,7 +67,7 @@ function extractMessage(
 function isGeneratedUserText(text: string): boolean {
   const normalized = text.trim();
   return (
-    normalized.startsWith('# AGENTS.md instructions for') ||
+    normalized.startsWith('# AGENTS.md instructions') ||
     normalized.startsWith('<environment_context>') ||
     normalized.startsWith('<turn_aborted>') ||
     normalized.startsWith('<user_action>')

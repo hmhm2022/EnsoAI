@@ -41,6 +41,17 @@ interface StateRow {
   value: string;
 }
 
+export interface CodexIndexedFileFingerprint {
+  fileMtimeMs: number;
+  fileSize: number;
+}
+
+interface IndexedFileFingerprintRow {
+  file_path: string;
+  file_mtime_ms: number;
+  file_size: number;
+}
+
 function dbRun(database: sqlite3.Database, sql: string, params: unknown[] = []): Promise<void> {
   return new Promise((resolve, reject) => {
     database.run(sql, params, (error: Error | null) => {
@@ -92,6 +103,7 @@ function closeDatabase(database: sqlite3.Database): Promise<void> {
 
 export class CodexHistoryIndexStore {
   private database: sqlite3.Database | null = null;
+  private writeTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly dbPath: string) {}
 
@@ -111,79 +123,102 @@ export class CodexHistoryIndexStore {
   }
 
   async close(): Promise<void> {
+    await this.waitForPendingWrites();
     if (!this.database) return;
     const database = this.database;
     this.database = null;
     await closeDatabase(database);
   }
 
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.writeTail.then(operation);
+    this.writeTail = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  private async waitForPendingWrites(): Promise<void> {
+    await this.writeTail;
+  }
+
   async upsertSession(record: CodexSessionMetadata): Promise<void> {
-    const database = this.getDatabase();
-    await dbRun(database, 'BEGIN TRANSACTION');
-    try {
-      await this.writeSession(database, record);
-      await dbRun(database, 'COMMIT');
-    } catch (error) {
-      await dbRun(database, 'ROLLBACK').catch(() => {});
-      throw error;
-    }
+    return this.enqueueWrite(async () => {
+      const database = this.getDatabase();
+      await dbRun(database, 'BEGIN TRANSACTION');
+      try {
+        await this.writeSession(database, record);
+        await dbRun(database, 'COMMIT');
+      } catch (error) {
+        await dbRun(database, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async upsertSessions(records: CodexSessionMetadata[]): Promise<void> {
     if (records.length === 0) return;
 
-    const database = this.getDatabase();
-    await dbRun(database, 'BEGIN TRANSACTION');
-    try {
-      for (const record of records) await this.writeSession(database, record);
-      await dbRun(database, 'COMMIT');
-    } catch (error) {
-      await dbRun(database, 'ROLLBACK').catch(() => {});
-      throw error;
-    }
+    return this.enqueueWrite(async () => {
+      const database = this.getDatabase();
+      await dbRun(database, 'BEGIN TRANSACTION');
+      try {
+        for (const record of records) await this.writeSession(database, record);
+        await dbRun(database, 'COMMIT');
+      } catch (error) {
+        await dbRun(database, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async deleteByFilePath(filePath: string): Promise<void> {
-    const database = this.getDatabase();
-    await dbRun(database, 'BEGIN TRANSACTION');
-    try {
-      await dbRun(
-        database,
-        'DELETE FROM codex_session_cwds WHERE session_id IN (SELECT session_id FROM codex_sessions WHERE file_path = ?)',
-        [filePath]
-      );
-      await dbRun(database, 'DELETE FROM codex_sessions WHERE file_path = ?', [filePath]);
-      await dbRun(database, 'COMMIT');
-    } catch (error) {
-      await dbRun(database, 'ROLLBACK').catch(() => {});
-      throw error;
-    }
+    return this.enqueueWrite(async () => {
+      const database = this.getDatabase();
+      await dbRun(database, 'BEGIN TRANSACTION');
+      try {
+        await dbRun(
+          database,
+          'DELETE FROM codex_session_cwds WHERE session_id IN (SELECT session_id FROM codex_sessions WHERE file_path = ?)',
+          [filePath]
+        );
+        await dbRun(database, 'DELETE FROM codex_sessions WHERE file_path = ?', [filePath]);
+        await dbRun(database, 'COMMIT');
+      } catch (error) {
+        await dbRun(database, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async deleteMissingFiles(filePaths: Set<string>): Promise<void> {
-    const database = this.getDatabase();
     const paths = [...filePaths];
     const condition =
       paths.length === 0 ? '' : ` WHERE file_path NOT IN (${paths.map(() => '?').join(', ')})`;
     const childCondition =
       paths.length === 0 ? '' : ` WHERE file_path NOT IN (${paths.map(() => '?').join(', ')})`;
 
-    await dbRun(database, 'BEGIN TRANSACTION');
-    try {
-      await dbRun(
-        database,
-        `DELETE FROM codex_session_cwds WHERE session_id IN (SELECT session_id FROM codex_sessions${childCondition})`,
-        paths
-      );
-      await dbRun(database, `DELETE FROM codex_sessions${condition}`, paths);
-      await dbRun(database, 'COMMIT');
-    } catch (error) {
-      await dbRun(database, 'ROLLBACK').catch(() => {});
-      throw error;
-    }
+    return this.enqueueWrite(async () => {
+      const database = this.getDatabase();
+      await dbRun(database, 'BEGIN TRANSACTION');
+      try {
+        await dbRun(
+          database,
+          `DELETE FROM codex_session_cwds WHERE session_id IN (SELECT session_id FROM codex_sessions${childCondition})`,
+          paths
+        );
+        await dbRun(database, `DELETE FROM codex_sessions${condition}`, paths);
+        await dbRun(database, 'COMMIT');
+      } catch (error) {
+        await dbRun(database, 'ROLLBACK').catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async listSessions(query: CodexIndexListQuery): Promise<CodexSessionListItem[]> {
+    await this.waitForPendingWrites();
     const database = this.getDatabase();
     const params: unknown[] = [];
     let sql = `SELECT sessions.session_id, sessions.file_path, sessions.cwd, sessions.title,
@@ -216,6 +251,7 @@ export class CodexHistoryIndexStore {
   }
 
   async findLatest(query: CodexIndexLatestQuery): Promise<CodexLatestSessionResult | null> {
+    await this.waitForPendingWrites();
     const database = this.getDatabase();
     const conditions: string[] = ['sessions.created_at_ms >= ?'];
     const params: unknown[] = [query.startedAfter ?? 0];
@@ -234,6 +270,7 @@ export class CodexHistoryIndexStore {
   }
 
   async getSessionFilePath(sessionId: string): Promise<string | null> {
+    await this.waitForPendingWrites();
     const row = await dbGet<FilePathRow>(
       this.getDatabase(),
       'SELECT file_path FROM codex_sessions WHERE session_id = ?',
@@ -243,6 +280,7 @@ export class CodexHistoryIndexStore {
   }
 
   async getState(key: string): Promise<string | null> {
+    await this.waitForPendingWrites();
     const row = await dbGet<StateRow>(
       this.getDatabase(),
       'SELECT value FROM codex_index_state WHERE key = ?',
@@ -252,11 +290,27 @@ export class CodexHistoryIndexStore {
   }
 
   async setState(key: string, value: string): Promise<void> {
-    await dbRun(
+    return this.enqueueWrite(() =>
+      dbRun(
+        this.getDatabase(),
+        `INSERT INTO codex_index_state (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+        [key, value]
+      )
+    );
+  }
+
+  async getFileFingerprints(): Promise<Map<string, CodexIndexedFileFingerprint>> {
+    await this.waitForPendingWrites();
+    const rows = await dbAll<IndexedFileFingerprintRow>(
       this.getDatabase(),
-      `INSERT INTO codex_index_state (key, value) VALUES (?, ?)
-       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-      [key, value]
+      'SELECT file_path, file_mtime_ms, file_size FROM codex_sessions'
+    );
+    return new Map(
+      rows.map((row) => [
+        row.file_path,
+        { fileMtimeMs: row.file_mtime_ms, fileSize: row.file_size },
+      ])
     );
   }
 

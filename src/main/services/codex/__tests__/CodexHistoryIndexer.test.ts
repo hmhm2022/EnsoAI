@@ -1,9 +1,10 @@
 import { mkdir, rm, unlink, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CodexHistoryIndexer } from '../CodexHistoryIndexer';
 import { CodexHistoryIndexStore } from '../CodexHistoryIndexStore';
+import { readCodexSessionMetadata } from '../CodexHistoryMetadata';
 
 const testDirectories: string[] = [];
 const testStores: CodexHistoryIndexStore[] = [];
@@ -165,5 +166,91 @@ describe('CodexHistoryIndexer', () => {
         startedAfter: Date.parse('2026-07-20T08:59:00.000Z'),
       })
     ).resolves.toMatchObject([{ sessionId: matchedSessionId }]);
+  });
+
+  it('skips unchanged files on the second full scan', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-indexer-skip-${Date.now()}-${Math.random()}`);
+    testDirectories.push(root);
+    await mkdir(root, { recursive: true });
+    const store = new CodexHistoryIndexStore(path.join(root, 'index.db'));
+    await store.initialize();
+    testStores.push(store);
+    const readMetadata = vi.fn(readCodexSessionMetadata);
+    const indexer = new CodexHistoryIndexer(store, root, { readMetadata });
+    const sessionId = '51996abf-bc87-7e80-9909-3a86a414f7e8';
+    await createSessionFile(
+      root,
+      `rollout-2026-07-20T09-00-00-${sessionId}.jsonl`,
+      ['D:/work/current'],
+      '2026-07-20T09:00:00.000Z'
+    );
+
+    await indexer.runFullScan();
+    expect(readMetadata).toHaveBeenCalledTimes(1);
+
+    await indexer.runFullScan();
+    expect(readMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it('reindexes only the file whose size or mtime changed', async () => {
+    const { root, store } = await createTestContext();
+    const readMetadata = vi.fn(readCodexSessionMetadata);
+    const indexer = new CodexHistoryIndexer(store, root, { readMetadata });
+    const firstId = '61996abf-bc87-7e80-9909-3a86a414f7e8';
+    const secondId = '71996abf-bc87-7e80-9909-3a86a414f7e8';
+    const firstPath = await createSessionFile(
+      root,
+      `rollout-2026-07-20T09-00-00-${firstId}.jsonl`,
+      ['D:/work/first'],
+      '2026-07-20T09:00:00.000Z'
+    );
+    await createSessionFile(
+      root,
+      `rollout-2026-07-20T09-00-01-${secondId}.jsonl`,
+      ['D:/work/second'],
+      '2026-07-20T09:00:01.000Z'
+    );
+    await indexer.runFullScan();
+    readMetadata.mockClear();
+
+    await writeFile(
+      firstPath,
+      createSessionContent(['D:/work/first', 'D:/work/changed'], '2026-07-20T09:00:00.000Z'),
+      'utf8'
+    );
+    await indexer.runFullScan();
+
+    expect(readMetadata).toHaveBeenCalledTimes(1);
+    expect(readMetadata).toHaveBeenCalledWith(firstPath);
+  });
+
+  it('never exceeds the configured metadata read concurrency', async () => {
+    const { root, store } = await createTestContext();
+    let active = 0;
+    let maxActive = 0;
+    const readMetadata = vi.fn(async (filePath: string) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const metadata = await readCodexSessionMetadata(filePath);
+      active -= 1;
+      return metadata;
+    });
+    const indexer = new CodexHistoryIndexer(store, root, {
+      maxConcurrentReads: 2,
+      readMetadata,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      await createSessionFile(
+        root,
+        `rollout-2026-07-20T09-00-0${index}-${index}1996abf-bc87-7e80-9909-3a86a414f7e8.jsonl`,
+        [`D:/work/${index}`],
+        `2026-07-20T09:00:0${index}.000Z`
+      );
+    }
+
+    await indexer.runFullScan();
+
+    expect(maxActive).toBe(2);
   });
 });

@@ -9,6 +9,7 @@ import {
   getCodexHistory,
   initializeCodexHistoryIndex,
   listCodexSessions,
+  runCodexHistoryInitialScan,
 } from '../CodexHistoryService';
 
 const electronApp = vi.hoisted(() => ({ getPath: vi.fn() }));
@@ -27,6 +28,41 @@ describe('CodexHistoryService', () => {
   afterEach(async () => {
     await cleanupCodexHistoryIndex();
     electronApp.getPath.mockReset();
+  });
+
+  it('starts the watcher paused and resumes it after a successful initial scan', async () => {
+    const calls: string[] = [];
+    const watcher = {
+      start: vi.fn<(options: { paused: boolean }) => Promise<void>>(async () => {
+        calls.push('start');
+      }),
+      resume: vi.fn(() => {
+        calls.push('resume');
+      }),
+    };
+    const indexer = {
+      runFullScan: vi.fn(async () => {
+        calls.push('scan');
+      }),
+    };
+
+    await runCodexHistoryInitialScan(watcher, indexer);
+
+    expect(watcher.start).toHaveBeenCalledWith({ paused: true });
+    expect(calls).toEqual(['start', 'scan', 'resume']);
+  });
+
+  it('resumes the watcher when the initial scan fails', async () => {
+    const watcher = {
+      start: vi.fn<(options: { paused: boolean }) => Promise<void>>().mockResolvedValue(undefined),
+      resume: vi.fn<() => void>(),
+    };
+    const indexer = {
+      runFullScan: vi.fn<() => Promise<void>>().mockRejectedValue(new Error('scan failed')),
+    };
+
+    await expect(runCodexHistoryInitialScan(watcher, indexer)).rejects.toThrow('scan failed');
+    expect(watcher.resume).toHaveBeenCalledOnce();
   });
 
   it('stores the default index database under Electron userData instead of Codex sessions', async () => {
