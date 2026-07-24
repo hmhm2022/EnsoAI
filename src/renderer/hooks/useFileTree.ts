@@ -349,6 +349,21 @@ export function useFileTree({ rootPath, enabled = true, isActive = true }: UseFi
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
 
+  const gitInvalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const scheduleGitChangesInvalidate = useCallback(() => {
+    if (!rootPath) return;
+    if (gitInvalidateTimerRef.current) clearTimeout(gitInvalidateTimerRef.current);
+
+    gitInvalidateTimerRef.current = setTimeout(() => {
+      gitInvalidateTimerRef.current = null;
+      void queryClient.invalidateQueries({
+        queryKey: ['git', 'file-changes', rootPath],
+        refetchType: isActiveRef.current ? 'active' : 'none',
+      });
+    }, 200);
+  }, [queryClient, rootPath]);
+
   // File watch effect - always watch, but only update UI when active
   useEffect(() => {
     if (!rootPath || !enabled) return;
@@ -365,6 +380,8 @@ export function useFileTree({ rootPath, enabled = true, isActive = true }: UseFi
         window.electronAPI.env.platform
       );
       if (!parentTreePath) return;
+
+      scheduleGitChangesInvalidate();
 
       // Always invalidate cache regardless of isActive
       if (parentTreePath !== rootPath) {
@@ -393,8 +410,19 @@ export function useFileTree({ rootPath, enabled = true, isActive = true }: UseFi
     return () => {
       unsubscribe();
       window.electronAPI.file.watchStop(rootPath);
+      if (gitInvalidateTimerRef.current) {
+        clearTimeout(gitInvalidateTimerRef.current);
+        gitInvalidateTimerRef.current = null;
+      }
     };
-  }, [rootPath, enabled, queryClient, refreshNodeChildren, refreshTreeDirectory]);
+  }, [
+    rootPath,
+    enabled,
+    queryClient,
+    refreshNodeChildren,
+    refreshTreeDirectory,
+    scheduleGitChangesInvalidate,
+  ]);
 
   // File operations
   const createFile = useCallback(
@@ -449,7 +477,13 @@ export function useFileTree({ rootPath, enabled = true, isActive = true }: UseFi
     // Force invalidate all cached queries first
     queryClient.invalidateQueries({ queryKey: ['file', 'list'] });
 
-    await queryClient.refetchQueries({ queryKey: ['file', 'list', rootPath] });
+    // 同时刷新根目录与 Git 状态；非 Git 目录的 Git 错误不能影响文件树刷新
+    await Promise.all([
+      queryClient.refetchQueries({ queryKey: ['file', 'list', rootPath] }),
+      queryClient.refetchQueries({ queryKey: ['git', 'file-changes', rootPath] }).catch((error) => {
+        console.warn('[useFileTree] Git status refresh failed:', error);
+      }),
+    ]);
     console.log('[useFileTree] Root refetched');
 
     // Refetch all expanded directories in parallel

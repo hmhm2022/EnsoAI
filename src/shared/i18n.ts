@@ -229,6 +229,7 @@ export const zhTranslations: Record<string, string> = {
   'Force delete (ignore uncommitted changes)': '强制删除（忽略未提交的修改）',
   General: '通用',
   Git: 'Git',
+  'Git status': 'Git 状态',
   'Git not initialized': '不是 Git 仓库',
   // Git Submodules
   Submodules: '子模块',
@@ -471,8 +472,10 @@ export const zhTranslations: Record<string, string> = {
   'Try a different search term': '尝试使用不同的关键词搜索',
   'Two-column layout: tree sidebar, workspace': '两栏布局：树状侧边栏、工作区',
   'Unknown error': '未知错误',
+  Unstaged: '未暂存',
   'Unstaged changes': '未暂存的更改',
   'Unstaged changes ({{count}})': '更改 ({{count}})',
+  Untracked: '未跟踪',
   'Untracked changes ({{count}})': '未跟踪的更改 ({{count}})',
   'Untracked files': '未跟踪的文件',
   'Up to date': '已是最新',

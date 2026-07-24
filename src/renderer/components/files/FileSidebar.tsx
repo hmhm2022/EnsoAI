@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { FileCode } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { panelTransition } from '@/App/constants';
 import { normalizePath } from '@/App/storage';
 import { GlobalSearchDialog, type SearchMode } from '@/components/search';
@@ -14,6 +14,7 @@ import {
 import { addToast, toastManager } from '@/components/ui/toast';
 import { useEditor } from '@/hooks/useEditor';
 import { useFileTree } from '@/hooks/useFileTree';
+import { useFileChanges } from '@/hooks/useSourceControl';
 import { useI18n } from '@/i18n';
 import { isFocusLocked, pauseFocusLock, restoreFocus } from '@/lib/focusLock';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
@@ -24,6 +25,7 @@ import {
   FileConflictDialog,
 } from './FileConflictDialog';
 import { FileTree } from './FileTree';
+import { buildFileTreeGitDecorations } from './fileTreeGitDecorations';
 import { NewItemDialog } from './NewItemDialog';
 
 interface FileSidebarProps {
@@ -63,6 +65,18 @@ export function FileSidebar({
     resolveConflictsAndContinue,
     revealFile,
   } = useFileTree({ rootPath, enabled: !!rootPath, isActive: sidebarActive });
+  const { data: fileChangesResult } = useFileChanges(rootPath ?? null, sidebarActive);
+  const gitDecorations = useMemo(
+    () =>
+      rootPath
+        ? buildFileTreeGitDecorations(
+            rootPath,
+            fileChangesResult?.changes ?? [],
+            window.electronAPI.env.platform
+          )
+        : undefined,
+    [fileChangesResult?.changes, rootPath]
+  );
 
   const { tabs, activeTab, loadFile, closeFile, setActiveFile, navigateToFile } = useEditor();
 
@@ -435,6 +449,7 @@ export function FileSidebar({
         >
           <FileTree
             tree={tree}
+            gitDecorations={gitDecorations}
             expandedPaths={expandedPaths}
             onToggleExpand={toggleExpand}
             onFileClick={handleFileClick}
