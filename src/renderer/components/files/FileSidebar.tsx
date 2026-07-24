@@ -28,7 +28,6 @@ import { NewItemDialog } from './NewItemDialog';
 
 interface FileSidebarProps {
   rootPath: string | undefined;
-  isActive?: boolean;
   sessionId?: string | null;
   width: number;
   collapsed: boolean;
@@ -41,7 +40,6 @@ type NewItemType = 'file' | 'directory' | null;
 
 export function FileSidebar({
   rootPath,
-  isActive = false,
   sessionId,
   width,
   collapsed,
@@ -50,6 +48,7 @@ export function FileSidebar({
   onSwitchTab,
 }: FileSidebarProps) {
   const { t } = useI18n();
+  const sidebarActive = !collapsed;
   const {
     tree,
     isLoading,
@@ -63,7 +62,7 @@ export function FileSidebar({
     handleExternalDrop,
     resolveConflictsAndContinue,
     revealFile,
-  } = useFileTree({ rootPath, enabled: !!rootPath, isActive });
+  } = useFileTree({ rootPath, enabled: !!rootPath, isActive: sidebarActive });
 
   const { tabs, activeTab, loadFile, closeFile, setActiveFile, navigateToFile } = useEditor();
 
