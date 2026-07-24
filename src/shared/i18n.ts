@@ -702,6 +702,7 @@ export const zhTranslations: Record<string, string> = {
   'Choose how repositories and submodules are displayed in source control':
     '选择版本管理中仓库和子模块的展示方式',
   List: '列表',
+  Graph: '图表',
   'VSCode-style collapsible list': 'VSCode 风格可折叠列表',
   Tabs: '标签页',
   'Horizontal tabs for quick switching': '水平标签页，快速切换',

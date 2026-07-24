@@ -9,12 +9,15 @@ import {
   RotateCcw,
   Undo2,
 } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { toastManager } from '@/components/ui/toast';
 import { Tooltip, TooltipPopup, TooltipTrigger } from '@/components/ui/tooltip';
 import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
+import { CommitGraph } from './CommitGraph';
+import { buildCommitGraphLayout } from './commitGraphLayout';
+import { type CommitRefKind, parseCommitRefs } from './commitRefLabels';
 import { type ResetMode, ResetModeDialog } from './ResetModeDialog';
 
 interface CommitHistoryListProps {
@@ -34,12 +37,21 @@ interface CommitHistoryListProps {
   // Git operations
   workdir?: string;
   onRefresh?: () => void;
+  graphView?: boolean;
+  graphRefColors?: ReadonlyMap<string, number>;
 }
 
 const RESET_MODE_LABELS: Record<ResetMode, string> = {
   soft: 'Soft Reset',
   mixed: 'Mixed Reset',
   hard: 'Hard Reset',
+};
+
+const REF_LABEL_CLASSES: Record<CommitRefKind, string> = {
+  head: 'bg-blue-500 text-white',
+  local: 'bg-orange-500 text-white',
+  remote: 'bg-violet-700 text-white',
+  tag: 'bg-amber-500 text-amber-950',
 };
 
 export function CommitHistoryList({
@@ -57,6 +69,8 @@ export function CommitHistoryList({
   onFileClick,
   workdir,
   onRefresh,
+  graphView = false,
+  graphRefColors,
 }: CommitHistoryListProps) {
   const { t, locale } = useI18n();
   const observerTarget = useRef<HTMLDivElement>(null);
@@ -219,6 +233,22 @@ export function CommitHistoryList({
     };
   }, [onLoadMore, hasNextPage, isFetchingNextPage]);
 
+  const graphRows = useMemo(
+    () => (graphView ? buildCommitGraphLayout(commits, graphRefColors) : []),
+    [commits, graphRefColors, graphView]
+  );
+  const maxColumns = useMemo(
+    () =>
+      graphRows.reduce((max, row) => {
+        const rowMax = row.segments.reduce(
+          (segmentMax, segment) => Math.max(segmentMax, segment.fromColumn, segment.toColumn),
+          Math.max(row.column, row.lanes.length - 1)
+        );
+        return Math.max(max, rowMax);
+      }, 0) + 1,
+    [graphRows]
+  );
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -240,55 +270,88 @@ export function CommitHistoryList({
     <>
       <ScrollArea className="h-full min-h-0">
         <div className="space-y-0.5 p-2">
-          {commits.map((commit) => {
+          {commits.map((commit, index) => {
             const isSelected = selectedHash === commit.hash;
             const isExpanded = expandedCommitHash === commit.hash;
             return (
-              <div key={commit.hash} className="border-b border-border/50 last:border-0">
+              <div
+                key={commit.hash}
+                className={cn(!graphView && 'border-b border-border/50 last:border-0')}
+              >
                 <Tooltip>
                   <TooltipTrigger
                     className={cn(
-                      'group flex w-full items-start rounded-sm px-3 py-2 text-left transition-colors',
+                      graphView
+                        ? 'group flex h-7 w-full items-center px-2 text-left transition-colors'
+                        : 'group flex w-full items-start rounded-sm px-3 py-2 text-left transition-colors',
                       isSelected ? 'bg-accent text-accent-foreground' : 'hover:bg-accent/50'
                     )}
                     onClick={() => onCommitClick(commit.hash)}
                     onContextMenu={(e) => handleContextMenu(e, commit)}
                   >
+                    {graphView && graphRows[index] && (
+                      <CommitGraph row={graphRows[index]} maxColumns={maxColumns} />
+                    )}
+
                     {/* Message & Metadata */}
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm">{commit.message}</p>
-                      <div
-                        className={cn(
-                          'mt-0.5 flex items-center gap-2 text-xs',
-                          isSelected ? 'text-accent-foreground/70' : 'text-muted-foreground'
+                    {graphView ? (
+                      <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                        <p className="min-w-0 truncate text-xs">{commit.message}</p>
+                        {commit.refs && (
+                          <div
+                            className="flex shrink-0 items-center gap-1 overflow-hidden"
+                            title={commit.refs}
+                          >
+                            {parseCommitRefs(commit.refs).map((ref) => (
+                              <span
+                                key={`${ref.kind}-${ref.name}`}
+                                className={cn(
+                                  'inline-flex h-4 max-w-40 shrink-0 items-center truncate rounded-full px-1.5 text-[10px] font-medium leading-none',
+                                  REF_LABEL_CLASSES[ref.kind]
+                                )}
+                              >
+                                {ref.name}
+                              </span>
+                            ))}
+                          </div>
                         )}
-                      >
-                        <span className="truncate">{commit.author_name}</span>
-                        <span>·</span>
-                        <span>{formatDate(commit.date)}</span>
                       </div>
-                      {commit.refs && (
+                    ) : (
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm">{commit.message}</p>
                         <div
-                          className="mt-1 flex gap-1 overflow-hidden"
-                          title={commit.refs}
-                          style={{
-                            maskImage:
-                              'linear-gradient(to right, black calc(100% - 24px), transparent)',
-                            WebkitMaskImage:
-                              'linear-gradient(to right, black calc(100% - 24px), transparent)',
-                          }}
+                          className={cn(
+                            'mt-0.5 flex items-center gap-2 text-xs',
+                            isSelected ? 'text-accent-foreground/70' : 'text-muted-foreground'
+                          )}
                         >
-                          {commit.refs.split(', ').map((ref) => (
-                            <span
-                              key={ref}
-                              className="inline-flex shrink-0 items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"
-                            >
-                              {ref.replace('HEAD ->', '').replace('tag:', '').trim()}
-                            </span>
-                          ))}
+                          <span className="truncate">{commit.author_name}</span>
+                          <span>·</span>
+                          <span>{formatDate(commit.date)}</span>
                         </div>
-                      )}
-                    </div>
+                        {commit.refs && (
+                          <div
+                            className="mt-1 flex gap-1 overflow-hidden"
+                            title={commit.refs}
+                            style={{
+                              maskImage:
+                                'linear-gradient(to right, black calc(100% - 24px), transparent)',
+                              WebkitMaskImage:
+                                'linear-gradient(to right, black calc(100% - 24px), transparent)',
+                            }}
+                          >
+                            {commit.refs.split(', ').map((ref) => (
+                              <span
+                                key={ref}
+                                className="inline-flex shrink-0 items-center rounded-full bg-primary/10 px-1.5 py-0.5 text-xs font-medium text-primary"
+                              >
+                                {ref.replace('HEAD ->', '').replace('tag:', '').trim()}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </TooltipTrigger>
                   <TooltipPopup className="max-w-md" side="right" align="start" sideOffset={4}>
                     <div className="text-xs space-y-1.5 whitespace-pre-wrap">

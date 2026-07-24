@@ -10,6 +10,7 @@ export const IPC_CHANNELS = {
   GIT_BRANCH_CHECKOUT: 'git:branch:checkout',
   GIT_BRANCH_HEAD_INFO: 'git:branch:head-info',
   GIT_LOG: 'git:log',
+  GIT_GRAPH_LOG: 'git:graph-log',
   GIT_DIFF: 'git:diff',
   GIT_INIT: 'git:init',
   GIT_FILE_CHANGES: 'git:file-changes',

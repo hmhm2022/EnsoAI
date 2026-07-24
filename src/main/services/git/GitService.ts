@@ -13,6 +13,8 @@ import type {
   GhCliStatus,
   GitBlameLineInfo,
   GitBranch,
+  GitGraphLogPage,
+  GitGraphRef,
   GitLogEntry,
   GitStatus,
   GitSubmodule,
@@ -401,6 +403,65 @@ export class GitService {
       throw error;
     }
     return parseGitLogOutput(result);
+  }
+
+  async getGraphLog(maxCount = 50, skip = 0, submodulePath?: string): Promise<GitGraphLogPage> {
+    const git = this.getGitInstance(submodulePath);
+    const resolveName = async (args: string[]): Promise<string | null> => {
+      try {
+        return (await git.raw(args)).trim() || null;
+      } catch {
+        return null;
+      }
+    };
+    const resolveRef = async (name: string | null): Promise<GitGraphRef | null> => {
+      if (!name) return null;
+      const revision = await resolveName(['rev-parse', '--verify', name]);
+      return revision ? { name, revision } : null;
+    };
+
+    // Auto 模式只查询当前分支、远程跟踪分支和 VS Code 配置的基准分支。
+    const currentName = await resolveName(['symbolic-ref', '--quiet', '--short', 'HEAD']);
+    const remoteName = await resolveName([
+      'rev-parse',
+      '--abbrev-ref',
+      '--symbolic-full-name',
+      '@{upstream}',
+    ]);
+    const baseName = currentName
+      ? await resolveName(['config', '--get', `branch.${currentName}.vscode-merge-base`])
+      : null;
+    const refs = {
+      current: await resolveRef(currentName ?? 'HEAD'),
+      remote: await resolveRef(remoteName),
+      base: await resolveRef(baseName),
+    };
+    const refNames = Array.from(
+      new Set([refs.current?.name, refs.remote?.name, refs.base?.name].filter(Boolean))
+    ) as string[];
+
+    if (refNames.length === 0) return { entries: [], refs };
+
+    const options: string[] = [
+      '--parents',
+      '--topo-order',
+      `-n${maxCount}`,
+      `--pretty=format:${GIT_LOG_PRETTY_FORMAT}`,
+    ];
+    if (skip > 0) {
+      options.push(`--skip=${skip}`);
+    }
+
+    let result: string;
+    try {
+      result = await git.raw(['log', ...options, ...refNames]);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('does not have any commits yet')) {
+        return { entries: [], refs };
+      }
+      throw error;
+    }
+    return { entries: parseGitLogOutput(result), refs };
   }
 
   async getBranchHeadInfo(branchName: string): Promise<BranchHeadInfo | null> {

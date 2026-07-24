@@ -29,6 +29,7 @@ import type {
   FileSearchResult,
   GhCliStatus,
   GitBranch,
+  GitGraphLogPage,
   GitLogEntry,
   GitStatus,
   GitSubmodule,
@@ -79,6 +80,13 @@ const electronAPI = {
       submodulePath?: string
     ): Promise<GitLogEntry[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.GIT_LOG, workdir, maxCount, skip, submodulePath),
+    getGraphLog: (
+      workdir: string,
+      maxCount?: number,
+      skip?: number,
+      submodulePath?: string
+    ): Promise<GitGraphLogPage> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GIT_GRAPH_LOG, workdir, maxCount, skip, submodulePath),
     getBranches: (workdir: string): Promise<GitBranch[]> =>
       ipcRenderer.invoke(IPC_CHANNELS.GIT_BRANCH_LIST, workdir),
     createBranch: (workdir: string, name: string, startPoint?: string): Promise<void> =>

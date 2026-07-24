@@ -26,12 +26,29 @@ export interface GitBranch {
 
 export interface GitLogEntry {
   hash: string;
+  parents: string[];
   date: string;
   message: string;
   fullMessage: string;
   author_name: string;
   author_email: string;
   refs?: string;
+}
+
+export interface GitGraphRef {
+  name: string;
+  revision: string;
+}
+
+export interface GitGraphRefs {
+  current: GitGraphRef | null;
+  remote: GitGraphRef | null;
+  base: GitGraphRef | null;
+}
+
+export interface GitGraphLogPage {
+  entries: GitLogEntry[];
+  refs: GitGraphRefs;
 }
 
 export interface BranchHeadInfo {

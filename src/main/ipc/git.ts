@@ -76,6 +76,14 @@ export function registerGitHandlers(): void {
     }
   );
 
+  ipcMain.handle(
+    IPC_CHANNELS.GIT_GRAPH_LOG,
+    async (_, workdir: string, maxCount?: number, skip?: number, submodulePath?: string) => {
+      const git = getGitService(workdir);
+      return git.getGraphLog(maxCount, skip, submodulePath);
+    }
+  );
+
   ipcMain.handle(IPC_CHANNELS.GIT_BRANCH_LIST, async (_, workdir: string) => {
     const git = getGitService(workdir);
     return git.getBranches();

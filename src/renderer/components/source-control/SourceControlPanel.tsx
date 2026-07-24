@@ -1,3 +1,4 @@
+import type { GitGraphRefs } from '@shared/types';
 import { getPathBasename, joinPath, normalizePath } from '@shared/utils/path';
 import { useQueryClient } from '@tanstack/react-query';
 import { ChevronDown, GitBranch, GripVertical, History, PanelLeft } from 'lucide-react';
@@ -33,7 +34,12 @@ import {
   useGitPull,
   useGitPush,
 } from '@/hooks/useGit';
-import { useCommitDiff, useCommitFiles, useGitHistoryInfinite } from '@/hooks/useGitHistory';
+import {
+  useCommitDiff,
+  useCommitFiles,
+  useGitGraphHistoryInfinite,
+  useGitHistoryInfinite,
+} from '@/hooks/useGitHistory';
 import { useGitSync } from '@/hooks/useGitSync';
 import { useSharedFileWatch } from '@/hooks/useSharedFileWatch';
 import {
@@ -61,6 +67,7 @@ import { BranchSwitcher } from './BranchSwitcher';
 import { ChangesList } from './ChangesList';
 import { CommitBox } from './CommitBox';
 import { CommitDiffViewer } from './CommitDiffViewer';
+import { CommitGraphHistoryList } from './CommitGraphHistoryList';
 import { CommitHistoryList } from './CommitHistoryList';
 import { DiffViewer } from './DiffViewer';
 import { RepositoryList } from './RepositoryList';
@@ -73,6 +80,12 @@ interface SourceControlPanelProps {
   onExpandWorktree?: () => void;
   worktreeCollapsed?: boolean;
 }
+
+const EMPTY_GRAPH_REFS: GitGraphRefs = {
+  current: null,
+  remote: null,
+  base: null,
+};
 
 export function SourceControlPanel({
   rootPath,
@@ -111,6 +124,7 @@ export function SourceControlPanel({
   const [selectedCommitHash, setSelectedCommitHash] = useState<string | null>(null);
   const [selectedCommitFile, setSelectedCommitFile] = useState<string | null>(null);
   const [expandedCommitHash, setExpandedCommitHash] = useState<string | null>(null);
+  const [historyView, setHistoryView] = useState<'list' | 'graph'>('list');
 
   // Submodule commit history state
   const [selectedSubmoduleCommit, _setSelectedSubmoduleCommit] = useState<{
@@ -257,6 +271,28 @@ export function SourceControlPanel({
     refetch: refetchCommits,
   } = useGitHistoryInfinite(rootPath ?? null, 20);
 
+  const {
+    data: graphCommitsData,
+    isLoading: graphCommitsLoading,
+    hasNextPage: graphHasNextPage,
+    isFetchingNextPage: graphIsFetchingNextPage,
+    fetchNextPage: fetchGraphNextPage,
+    refetch: refetchGraphCommits,
+  } = useGitGraphHistoryInfinite(rootPath ?? null, 20);
+
+  const {
+    data: submoduleGraphCommitsData,
+    isLoading: submoduleGraphCommitsLoading,
+    hasNextPage: submoduleGraphHasNextPage,
+    isFetchingNextPage: submoduleGraphIsFetchingNextPage,
+    fetchNextPage: fetchSubmoduleGraphNextPage,
+    refetch: refetchSubmoduleGraphCommits,
+  } = useGitGraphHistoryInfinite(
+    selectedSubmodulePath ? (rootPath ?? null) : null,
+    20,
+    selectedSubmodulePath ?? undefined
+  );
+
   // Ensure a repository is selected when repositories are available
   // This fixes the issue where no repository is selected when switching to source control tab
   useEffect(() => {
@@ -275,6 +311,8 @@ export function SourceControlPanel({
     if (isActive && rootPath) {
       refetch();
       refetchCommits();
+      refetchGraphCommits();
+      refetchSubmoduleGraphCommits();
       refetchStatus();
       // Also refresh submodules data
       queryClient.invalidateQueries({ queryKey: ['git', 'submodules', rootPath] });
@@ -285,7 +323,17 @@ export function SourceControlPanel({
       });
       queryClient.invalidateQueries({ queryKey: ['git', 'submodule', 'diff', rootPath] });
     }
-  }, [isActive, rootPath, selectedRepoPath, refetch, refetchCommits, refetchStatus, queryClient]);
+  }, [
+    isActive,
+    rootPath,
+    selectedRepoPath,
+    refetch,
+    refetchCommits,
+    refetchGraphCommits,
+    refetchSubmoduleGraphCommits,
+    refetchStatus,
+    queryClient,
+  ]);
 
   // Wrap sync handlers to add additional refetch calls for SourceControlPanel
   const handleSync = useCallback(
@@ -541,6 +589,11 @@ export function SourceControlPanel({
   // Flatten infinite query data
   const mainCommits = commitsData?.pages.flat() ?? [];
   const submoduleCommits = submoduleCommitsData?.pages.flat() ?? [];
+  const mainGraphCommits = graphCommitsData?.pages.flatMap((page) => page.entries) ?? [];
+  const submoduleGraphCommits =
+    submoduleGraphCommitsData?.pages.flatMap((page) => page.entries) ?? [];
+  const mainGraphRefs = graphCommitsData?.pages[0]?.refs ?? EMPTY_GRAPH_REFS;
+  const submoduleGraphRefs = submoduleGraphCommitsData?.pages[0]?.refs ?? EMPTY_GRAPH_REFS;
   const currentCommits = selectedSubmodulePath ? submoduleCommits : mainCommits;
   const currentCommitsLoading = selectedSubmodulePath ? submoduleCommitsLoading : commitsLoading;
   const currentHasNextPage = selectedSubmodulePath ? submoduleHasNextPage : hasNextPage;
@@ -548,6 +601,20 @@ export function SourceControlPanel({
     ? submoduleIsFetchingNextPage
     : isFetchingNextPage;
   const currentFetchNextPage = selectedSubmodulePath ? fetchSubmoduleNextPage : fetchNextPage;
+  const currentGraphCommits = selectedSubmodulePath ? submoduleGraphCommits : mainGraphCommits;
+  const currentGraphRefs = selectedSubmodulePath ? submoduleGraphRefs : mainGraphRefs;
+  const currentGraphCommitsLoading = selectedSubmodulePath
+    ? submoduleGraphCommitsLoading
+    : graphCommitsLoading;
+  const currentGraphHasNextPage = selectedSubmodulePath
+    ? submoduleGraphHasNextPage
+    : graphHasNextPage;
+  const currentGraphIsFetchingNextPage = selectedSubmodulePath
+    ? submoduleGraphIsFetchingNextPage
+    : graphIsFetchingNextPage;
+  const currentGraphFetchNextPage = selectedSubmodulePath
+    ? fetchSubmoduleGraphNextPage
+    : fetchGraphNextPage;
 
   const { data: commitFiles = [], isLoading: commitFilesLoading } = useCommitFiles(
     rootPath ?? null,
@@ -1201,6 +1268,32 @@ export function SourceControlPanel({
                 <History className="h-4 w-4" />
                 <span className="text-sm font-medium">{t('History')}</span>
               </button>
+              <div className="mr-2 flex items-center gap-0.5 rounded-sm bg-muted p-0.5">
+                <button
+                  type="button"
+                  className={cn(
+                    'rounded-sm px-2 py-1 text-xs transition-colors',
+                    historyView === 'list'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                  onClick={() => setHistoryView('list')}
+                >
+                  {t('List')}
+                </button>
+                <button
+                  type="button"
+                  className={cn(
+                    'rounded-sm px-2 py-1 text-xs transition-colors',
+                    historyView === 'graph'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                  onClick={() => setHistoryView('graph')}
+                >
+                  {t('Graph')}
+                </button>
+              </div>
             </div>
 
             <div
@@ -1210,38 +1303,58 @@ export function SourceControlPanel({
               )}
             >
               <div className="absolute inset-0">
-                <CommitHistoryList
-                  commits={currentCommits}
-                  selectedHash={selectedCommitHash}
-                  onCommitClick={handleCommitClick}
-                  isLoading={currentCommitsLoading}
-                  isFetchingNextPage={currentIsFetchingNextPage}
-                  hasNextPage={currentHasNextPage}
-                  onLoadMore={() => {
-                    if (currentHasNextPage && !currentIsFetchingNextPage) {
-                      currentFetchNextPage();
-                    }
-                  }}
-                  expandedCommitHash={expandedCommitHash}
-                  commitFiles={commitFiles}
-                  commitFilesLoading={commitFilesLoading}
-                  selectedFile={selectedCommitFile}
-                  onFileClick={handleCommitFileClick}
-                  workdir={selectedRepoPath ?? rootPath ?? undefined}
-                  onRefresh={() => {
-                    refetch();
-                    refetchCommits();
-                    refetchStatus();
-                    if (rootPath) {
-                      queryClient.invalidateQueries({
-                        queryKey: ['git', 'file-diff', selectedRepoPath ?? rootPath],
-                      });
-                      queryClient.invalidateQueries({
-                        queryKey: ['git', 'submodule', 'diff', rootPath],
-                      });
-                    }
-                  }}
-                />
+                {historyView === 'list' ? (
+                  <CommitHistoryList
+                    commits={currentCommits}
+                    selectedHash={selectedCommitHash}
+                    onCommitClick={handleCommitClick}
+                    isLoading={currentCommitsLoading}
+                    isFetchingNextPage={currentIsFetchingNextPage}
+                    hasNextPage={currentHasNextPage}
+                    onLoadMore={() => {
+                      if (currentHasNextPage && !currentIsFetchingNextPage) currentFetchNextPage();
+                    }}
+                    expandedCommitHash={expandedCommitHash}
+                    commitFiles={commitFiles}
+                    commitFilesLoading={commitFilesLoading}
+                    selectedFile={selectedCommitFile}
+                    onFileClick={handleCommitFileClick}
+                    workdir={selectedRepoPath ?? rootPath ?? undefined}
+                    onRefresh={() => {
+                      refetch();
+                      refetchCommits();
+                      refetchGraphCommits();
+                      refetchStatus();
+                    }}
+                  />
+                ) : (
+                  <CommitGraphHistoryList
+                    commits={currentGraphCommits}
+                    graphRefs={currentGraphRefs}
+                    selectedHash={selectedCommitHash}
+                    onCommitClick={handleCommitClick}
+                    isLoading={currentGraphCommitsLoading}
+                    isFetchingNextPage={currentGraphIsFetchingNextPage}
+                    hasNextPage={currentGraphHasNextPage}
+                    onLoadMore={() => {
+                      if (currentGraphHasNextPage && !currentGraphIsFetchingNextPage) {
+                        currentGraphFetchNextPage();
+                      }
+                    }}
+                    expandedCommitHash={expandedCommitHash}
+                    commitFiles={commitFiles}
+                    commitFilesLoading={commitFilesLoading}
+                    selectedFile={selectedCommitFile}
+                    onFileClick={handleCommitFileClick}
+                    workdir={selectedRepoPath ?? rootPath ?? undefined}
+                    onRefresh={() => {
+                      refetch();
+                      refetchCommits();
+                      refetchGraphCommits();
+                      refetchStatus();
+                    }}
+                  />
+                )}
               </div>
             </div>
           </div>
