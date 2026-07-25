@@ -35,7 +35,21 @@ export interface GitLogEntry {
   refs?: string;
 }
 
+export type GitGraphReferenceKind = 'head' | 'local' | 'remote' | 'tag';
+
+export interface GitGraphReference {
+  id: string;
+  name: string;
+  revision: string;
+  kind: GitGraphReferenceKind;
+}
+
+export interface GitGraphLogEntry extends GitLogEntry {
+  references: GitGraphReference[];
+}
+
 export interface GitGraphRef {
+  id: string;
   name: string;
   revision: string;
 }
@@ -47,8 +61,9 @@ export interface GitGraphRefs {
 }
 
 export interface GitGraphLogPage {
-  entries: GitLogEntry[];
+  entries: GitGraphLogEntry[];
   refs: GitGraphRefs;
+  mergeBase: string | null;
 }
 
 export interface BranchHeadInfo {

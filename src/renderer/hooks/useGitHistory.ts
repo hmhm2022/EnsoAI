@@ -53,7 +53,11 @@ export function useGitGraphHistoryInfinite(
     queryKey: ['git', 'graph-log-infinite', workdir, submodulePath],
     queryFn: async ({ pageParam }) => {
       if (!workdir) {
-        return { entries: [], refs: { current: null, remote: null, base: null } };
+        return {
+          entries: [],
+          refs: { current: null, remote: null, base: null },
+          mergeBase: null,
+        };
       }
       const skip = (pageParam ?? 0) as number;
       return window.electronAPI.git.getGraphLog(

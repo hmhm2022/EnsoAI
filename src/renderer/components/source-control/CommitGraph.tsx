@@ -4,6 +4,7 @@ import type { GraphLane, GraphRow } from './commitGraphLayout';
 interface CommitGraphProps {
   row: GraphRow;
   maxColumns: number;
+  isSelected: boolean;
   rowHeight?: number;
   columnWidth?: number;
   className?: string;
@@ -12,7 +13,7 @@ interface CommitGraphProps {
 const GRAPH_COLORS = [
   'var(--color-blue-500)',
   'var(--color-violet-700)',
-  'var(--color-orange-600)',
+  '#EA5C00',
   '#FFB000',
   '#DC267F',
   '#994F00',
@@ -50,6 +51,7 @@ function findLastLaneColumn(lanes: GraphLane[], hash: string): number {
 export function CommitGraph({
   row,
   maxColumns,
+  isSelected,
   rowHeight = 22,
   columnWidth = 11,
   className,
@@ -57,6 +59,7 @@ export function CommitGraph({
   const graphWidth = Math.max(22, getLaneX(Math.max(0, maxColumns - 1), columnWidth) + 6);
   const centerY = rowHeight / 2;
   const nodeX = getLaneX(row.column, columnWidth);
+  const isHollow = row.kind === 'HEAD' || row.kind === 'incoming' || row.kind === 'outgoing';
 
   return (
     <svg
@@ -151,7 +154,18 @@ export function CommitGraph({
         );
       })}
 
-      <circle cx={nodeX} cy={centerY} fill={getGraphColor(row.circleColor)} r="4" />
+      <circle
+        className={cn(
+          isHollow && 'fill-background group-hover:fill-accent',
+          isHollow && isSelected && 'fill-accent'
+        )}
+        cx={nodeX}
+        cy={centerY}
+        fill={isHollow ? undefined : getGraphColor(row.circleColor)}
+        r="4"
+        stroke={getGraphColor(row.circleColor)}
+        strokeWidth={isHollow ? 2 : 0}
+      />
     </svg>
   );
 }

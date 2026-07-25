@@ -335,6 +335,14 @@ export function SourceControlPanel({
     queryClient,
   ]);
 
+  // Git 写操作完成后按根路径刷新全部图表，确保主仓库和子模块不会刷新错对象。
+  const invalidateGraphHistory = useCallback(() => {
+    if (!rootPath) return;
+    void queryClient.invalidateQueries({
+      queryKey: ['git', 'graph-log-infinite', rootPath],
+    });
+  }, [queryClient, rootPath]);
+
   // Wrap sync handlers to add additional refetch calls for SourceControlPanel
   const handleSync = useCallback(
     async (repoPath: string) => {
@@ -370,6 +378,7 @@ export function SourceControlPanel({
         }
         refetch();
         refetchCommits();
+        invalidateGraphHistory();
 
         const branch = repo.branch ?? '';
         if (pulled && pushed) {
@@ -430,6 +439,7 @@ export function SourceControlPanel({
       refetchStatus,
       refetch,
       refetchCommits,
+      invalidateGraphHistory,
       t,
     ]
   );
@@ -458,6 +468,7 @@ export function SourceControlPanel({
         }
         refetch();
         refetchCommits();
+        invalidateGraphHistory();
 
         toastManager.add({
           title: t('Branch published'),
@@ -478,7 +489,17 @@ export function SourceControlPanel({
         setSyncingPath(null);
       }
     },
-    [rootPath, repositories, pushMutation, queryClient, refetchStatus, refetch, refetchCommits, t]
+    [
+      rootPath,
+      repositories,
+      pushMutation,
+      queryClient,
+      refetchStatus,
+      refetch,
+      refetchCommits,
+      invalidateGraphHistory,
+      t,
+    ]
   );
 
   // Branch checkout handler - handles both main repo and submodule branches
@@ -509,6 +530,7 @@ export function SourceControlPanel({
           refetchCommits();
           refetchStatus();
         }
+        invalidateGraphHistory();
 
         // Normalize branch name for display (remotes/origin/dev → dev)
         const displayBranch = branch.startsWith('remotes/')
@@ -543,6 +565,7 @@ export function SourceControlPanel({
       refetchStatus,
       refetchSubmoduleChanges,
       refetchSubmoduleCommits,
+      invalidateGraphHistory,
       t,
     ]
   );
@@ -559,6 +582,7 @@ export function SourceControlPanel({
         refetchBranches();
         refetchCommits();
         refetchStatus();
+        invalidateGraphHistory();
 
         toastManager.add({
           title: t('Branch created'),
@@ -582,6 +606,7 @@ export function SourceControlPanel({
       refetchBranches,
       refetchCommits,
       refetchStatus,
+      invalidateGraphHistory,
       t,
     ]
   );
@@ -594,6 +619,9 @@ export function SourceControlPanel({
     submoduleGraphCommitsData?.pages.flatMap((page) => page.entries) ?? [];
   const mainGraphRefs = graphCommitsData?.pages[0]?.refs ?? EMPTY_GRAPH_REFS;
   const submoduleGraphRefs = submoduleGraphCommitsData?.pages[0]?.refs ?? EMPTY_GRAPH_REFS;
+  // 虚拟传入/传出行依赖首批提交的共同祖先，主仓库和子模块分别读取。
+  const mainGraphMergeBase = graphCommitsData?.pages[0]?.mergeBase ?? null;
+  const submoduleGraphMergeBase = submoduleGraphCommitsData?.pages[0]?.mergeBase ?? null;
   const currentCommits = selectedSubmodulePath ? submoduleCommits : mainCommits;
   const currentCommitsLoading = selectedSubmodulePath ? submoduleCommitsLoading : commitsLoading;
   const currentHasNextPage = selectedSubmodulePath ? submoduleHasNextPage : hasNextPage;
@@ -603,6 +631,9 @@ export function SourceControlPanel({
   const currentFetchNextPage = selectedSubmodulePath ? fetchSubmoduleNextPage : fetchNextPage;
   const currentGraphCommits = selectedSubmodulePath ? submoduleGraphCommits : mainGraphCommits;
   const currentGraphRefs = selectedSubmodulePath ? submoduleGraphRefs : mainGraphRefs;
+  const currentGraphMergeBase = selectedSubmodulePath
+    ? submoduleGraphMergeBase
+    : mainGraphMergeBase;
   const currentGraphCommitsLoading = selectedSubmodulePath
     ? submoduleGraphCommitsLoading
     : graphCommitsLoading;
@@ -940,6 +971,7 @@ export function SourceControlPanel({
 
       try {
         await commitMutation.mutateAsync({ workdir: selectedRepoPath, message });
+        invalidateGraphHistory();
         toastManager.add({
           title: t('Commit successful'),
           description: t('Committed {{count}} files', { count: staged.length }),
@@ -956,7 +988,7 @@ export function SourceControlPanel({
         });
       }
     },
-    [selectedRepoPath, staged.length, commitMutation, setSelectedFile, t]
+    [selectedRepoPath, staged.length, commitMutation, setSelectedFile, invalidateGraphHistory, t]
   );
 
   const isCommitting = commitMutation.isPending;
@@ -1324,6 +1356,7 @@ export function SourceControlPanel({
                       refetch();
                       refetchCommits();
                       refetchGraphCommits();
+                      invalidateGraphHistory();
                       refetchStatus();
                     }}
                   />
@@ -1331,6 +1364,7 @@ export function SourceControlPanel({
                   <CommitGraphHistoryList
                     commits={currentGraphCommits}
                     graphRefs={currentGraphRefs}
+                    mergeBase={currentGraphMergeBase}
                     selectedHash={selectedCommitHash}
                     onCommitClick={handleCommitClick}
                     isLoading={currentGraphCommitsLoading}
@@ -1351,6 +1385,7 @@ export function SourceControlPanel({
                       refetch();
                       refetchCommits();
                       refetchGraphCommits();
+                      invalidateGraphHistory();
                       refetchStatus();
                     }}
                   />

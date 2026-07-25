@@ -1,8 +1,10 @@
-import type { CommitFileChange, GitGraphRefs, GitLogEntry } from '@shared/types';
+import type { CommitFileChange, GitGraphLogEntry, GitGraphRefs } from '@shared/types';
+import { useMemo } from 'react';
 import { CommitHistoryList } from './CommitHistoryList';
+import { buildCommitGraphLayout } from './commitGraphLayout';
 
 export interface CommitGraphHistoryListProps {
-  commits: GitLogEntry[];
+  commits: GitGraphLogEntry[];
   selectedHash: string | null;
   onCommitClick: (hash: string) => void;
   isLoading?: boolean;
@@ -17,18 +19,29 @@ export interface CommitGraphHistoryListProps {
   workdir?: string;
   onRefresh?: () => void;
   graphRefs: GitGraphRefs;
+  mergeBase: string | null;
 }
 
 /** 图表视图沿用提交操作和文件展开逻辑，但使用独立的图表行布局。 */
 export function CommitGraphHistoryList({
   commits,
   graphRefs,
+  mergeBase,
   ...props
 }: CommitGraphHistoryListProps) {
-  const refColors = new Map<string, number>();
-  if (graphRefs.current) refColors.set(graphRefs.current.revision, 0);
-  if (graphRefs.remote) refColors.set(graphRefs.remote.revision, 1);
-  if (graphRefs.base) refColors.set(graphRefs.base.revision, 2);
+  // 图表布局依赖完整引用和共同祖先，避免在共享列表中重复计算。
+  const graphRows = useMemo(
+    () => buildCommitGraphLayout(commits, graphRefs, mergeBase),
+    [commits, graphRefs, mergeBase]
+  );
 
-  return <CommitHistoryList {...props} commits={commits} graphView graphRefColors={refColors} />;
+  return (
+    <CommitHistoryList
+      {...props}
+      commits={commits}
+      graphRefs={graphRefs}
+      graphRows={graphRows}
+      graphView
+    />
+  );
 }
