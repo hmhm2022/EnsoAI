@@ -3,6 +3,7 @@ import { mkdir, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CodexHistoryIndexStore } from '../CodexHistoryIndexStore';
 import {
   cleanupCodexHistoryIndex,
   findLatestCodexSession,
@@ -229,6 +230,40 @@ describe('CodexHistoryService', () => {
     );
   });
 
+  it('refreshes a completed native index only when the final lookup requests it', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-final-refresh-${Date.now()}`);
+    const dbPath = path.join(root, 'index.db');
+    const cwd = 'D:/work/current';
+    const originator = 'ensoai-final-refresh';
+    const sessionId = '61996abf-bc87-7e80-9909-3a86a414f7e8';
+    await mkdir(root, { recursive: true });
+    await initializeCodexHistoryIndex({ dbPath, sessionsRoot: root });
+
+    const stateStore = new CodexHistoryIndexStore(dbPath);
+    await stateStore.initialize();
+    await stateStore.setState('initial_scan_completed', 'true');
+    await stateStore.close();
+
+    const filePath = await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      JSON.stringify({ type: 'session_meta', payload: { cwd, originator, source: 'cli' } })
+    );
+
+    await expect(
+      findLatestCodexSession({ sessionsRoot: root, cwd, originator, startedAfter: 0 })
+    ).resolves.toBeNull();
+    await expect(
+      findLatestCodexSession({
+        sessionsRoot: root,
+        cwd,
+        originator,
+        startedAfter: 0,
+        refreshOnMiss: true,
+      })
+    ).resolves.toEqual({ sessionId, filePath });
+  });
+
   it('loads history by session id', async () => {
     const root = path.join(os.tmpdir(), `enso-codex-history-${Date.now()}`);
     await mkdir(root, { recursive: true });
@@ -317,6 +352,35 @@ describe('CodexHistoryService', () => {
         cwd,
         startedAfter: 0,
         matchMode: 'legacy-unique',
+      })
+    ).resolves.toEqual({ sessionId, filePath, wslDistro: 'Ubuntu' });
+  });
+
+  it('forces a fresh WSL scan for the final strict lookup', async () => {
+    const root = path.join(os.tmpdir(), `enso-codex-wsl-strict-refresh-${Date.now()}`);
+    const cwd = '/home/user/repo';
+    const originator = 'ensoai-wsl-final';
+    const sessionId = '71996abf-bc87-7e80-9909-3a86a414f7e8';
+    await mkdir(root, { recursive: true });
+    wslResolver.resolve.mockResolvedValue({ sessionsRoot: root, cwd, wslDistro: 'Ubuntu' });
+
+    await expect(
+      findLatestCodexSession({ runtime: 'wsl', cwd, originator, startedAfter: 0 })
+    ).resolves.toBeNull();
+
+    const filePath = await createSessionFile(
+      root,
+      `rollout-2026-07-17T10-00-00-${sessionId}.jsonl`,
+      JSON.stringify({ type: 'session_meta', payload: { cwd, originator, source: 'cli' } })
+    );
+
+    await expect(
+      findLatestCodexSession({
+        runtime: 'wsl',
+        cwd,
+        originator,
+        startedAfter: 0,
+        refreshOnMiss: true,
       })
     ).resolves.toEqual({ sessionId, filePath, wslDistro: 'Ubuntu' });
   });
