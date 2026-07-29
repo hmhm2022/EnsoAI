@@ -59,7 +59,9 @@ export function CommitGraph({
   const graphWidth = Math.max(22, getLaneX(Math.max(0, maxColumns - 1), columnWidth) + 6);
   const centerY = rowHeight / 2;
   const nodeX = getLaneX(row.column, columnWidth);
-  const isHollow = row.kind === 'HEAD' || row.kind === 'incoming' || row.kind === 'outgoing';
+  const isVirtualChange = row.kind === 'incoming' || row.kind === 'outgoing';
+  // HEAD 使用实线圆环，传入和传出提示节点使用虚线圆环，避免含义混淆。
+  const isHollow = row.kind === 'HEAD' || isVirtualChange;
 
   return (
     <svg
@@ -162,9 +164,10 @@ export function CommitGraph({
         cx={nodeX}
         cy={centerY}
         fill={isHollow ? undefined : getGraphColor(row.circleColor)}
-        r="4"
+        r={isVirtualChange ? 5 : 4}
         stroke={getGraphColor(row.circleColor)}
-        strokeWidth={isHollow ? 2 : 0}
+        strokeDasharray={isVirtualChange ? '3 2' : undefined}
+        strokeWidth={isVirtualChange ? 1.5 : isHollow ? 2 : 0}
       />
     </svg>
   );
