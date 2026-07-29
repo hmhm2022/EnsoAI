@@ -81,7 +81,9 @@ const RECENT_OUTPUT_TIMEOUT_MS = 3000; // If output received within this time, c
 const CODEX_SESSION_DETECT_RETRY_MS = 1000;
 const CODEX_SESSION_DETECT_TIMEOUT_MS = 15000;
 const CODEX_SESSION_DETECT_STARTED_AFTER_PADDING_MS = 5000;
-const CODEX_SESSION_UPGRADE_MESSAGE = '未能唯一识别 Codex 会话，请升级 Codex 后重试。';
+const CODEX_SESSION_NOT_FOUND_MESSAGE = '暂未找到 Codex 会话记录，可在下一次发送内容时重试。';
+const CODEX_SESSION_ALREADY_CLAIMED_MESSAGE = '该 Codex 会话已关联到其他标签页。';
+const CODEX_SESSION_READ_FAILED_MESSAGE = '读取 Codex 会话记录失败，请稍后重试。';
 
 export function AgentTerminal({
   id,
@@ -163,11 +165,12 @@ export function AgentTerminal({
   const currentTitleRef = useRef<string>(''); // Terminal title from OSC escape sequence.
   const tmuxSessionNameRef = useRef<string | null>(null); // Tmux session name for cleanup.
   const codexStartTimeRef = useRef<number | null>(null);
+  const codexInitialPromptDetectionStartedRef = useRef(false);
   const codexSessionDetectIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const codexSessionDetectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const codexSessionDetectInFlightRef = useRef(false);
-  const codexLegacyFallbackPendingRef = useRef(false);
-  const codexLegacyFallbackStartedRef = useRef(false);
+  const codexFinalDetectionPendingRef = useRef(false);
+  const codexFinalDetectionStartedRef = useRef(false);
   const codexStatusOutputRef = useRef<(data: string) => void>(() => {});
   const cliSessionIdRef = useRef<string | undefined>(cliSessionId);
   const notifiedCodexRuntimeRef = useRef<CodexRuntime | null>(null);
@@ -226,7 +229,7 @@ export function AgentTerminal({
       clearTimeout(codexSessionDetectTimeoutRef.current);
       codexSessionDetectTimeoutRef.current = null;
     }
-    codexLegacyFallbackPendingRef.current = false;
+    codexFinalDetectionPendingRef.current = false;
   }, []);
 
   const startCodexSessionDetection = useCallback(() => {
@@ -247,10 +250,10 @@ export function AgentTerminal({
       excludeSessionIds,
       runtime: codexRuntime,
     };
-    codexLegacyFallbackPendingRef.current = false;
-    codexLegacyFallbackStartedRef.current = false;
+    codexFinalDetectionPendingRef.current = false;
+    codexFinalDetectionStartedRef.current = false;
 
-    let runLegacyFallback: () => void;
+    let runFinalDetection: () => void;
 
     const detectOnce = () => {
       if (
@@ -287,15 +290,15 @@ export function AgentTerminal({
         .catch(() => {})
         .finally(() => {
           codexSessionDetectInFlightRef.current = false;
-          if (codexLegacyFallbackPendingRef.current) runLegacyFallback();
+          if (codexFinalDetectionPendingRef.current) runFinalDetection();
         });
     };
 
-    runLegacyFallback = () => {
+    runFinalDetection = () => {
       if (
-        codexLegacyFallbackStartedRef.current ||
+        codexFinalDetectionStartedRef.current ||
         codexSessionDetectInFlightRef.current ||
-        !codexLegacyFallbackPendingRef.current
+        !codexFinalDetectionPendingRef.current
       ) {
         return;
       }
@@ -304,37 +307,48 @@ export function AgentTerminal({
         return;
       }
 
-      codexLegacyFallbackStartedRef.current = true;
-      codexLegacyFallbackPendingRef.current = false;
+      codexFinalDetectionStartedRef.current = true;
+      codexFinalDetectionPendingRef.current = false;
       codexSessionDetectInFlightRef.current = true;
-      // 超时后只查询一次，旧版 Codex 仅在唯一主 CLI 会话时才允许关联。
-      window.electronAPI.codexHistory
-        .findLatest({ ...strictQuery, matchMode: 'legacy-unique' })
-        .then((result) => {
+      // 结束前刷新近期文件并严格匹配；仍为空时才查询旧版 Codex 的唯一主会话。
+      void (async () => {
+        try {
+          const strictResult = await window.electronAPI.codexHistory.findLatest({
+            ...strictQuery,
+            originator: codexSessionOriginator,
+            refreshOnMiss: true,
+          });
+          const result =
+            strictResult ??
+            (await window.electronAPI.codexHistory.findLatest({
+              ...strictQuery,
+              matchMode: 'legacy-unique',
+              refreshOnMiss: true,
+            }));
+
           if (!result?.sessionId || cliSessionIdRef.current) {
             if (!result?.sessionId && !cliSessionIdRef.current) {
-              codexStatusOutputRef.current(`\r\n${CODEX_SESSION_UPGRADE_MESSAGE}\r\n`);
+              codexStatusOutputRef.current(`\r\n${CODEX_SESSION_NOT_FOUND_MESSAGE}\r\n`);
             }
             return;
           }
           const claimed =
             onCliSessionIdDetected?.(result.sessionId, codexRuntime, result.wslDistro) ?? true;
           if (!claimed) {
-            codexStatusOutputRef.current(`\r\n${CODEX_SESSION_UPGRADE_MESSAGE}\r\n`);
+            codexStatusOutputRef.current(`\r\n${CODEX_SESSION_ALREADY_CLAIMED_MESSAGE}\r\n`);
             return;
           }
 
           cliSessionIdRef.current = result.sessionId;
-        })
-        .catch(() => {
+        } catch {
           if (!cliSessionIdRef.current) {
-            codexStatusOutputRef.current(`\r\n${CODEX_SESSION_UPGRADE_MESSAGE}\r\n`);
+            codexStatusOutputRef.current(`\r\n${CODEX_SESSION_READ_FAILED_MESSAGE}\r\n`);
           }
-        })
-        .finally(() => {
+        } finally {
           codexSessionDetectInFlightRef.current = false;
           stopCodexSessionDetection();
-        });
+        }
+      })();
     };
 
     detectOnce();
@@ -345,8 +359,8 @@ export function AgentTerminal({
         clearInterval(codexSessionDetectIntervalRef.current);
         codexSessionDetectIntervalRef.current = null;
       }
-      codexLegacyFallbackPendingRef.current = true;
-      runLegacyFallback();
+      codexFinalDetectionPendingRef.current = true;
+      runFinalDetection();
     }, CODEX_SESSION_DETECT_TIMEOUT_MS);
   }, [
     agentCommand,
@@ -717,15 +731,6 @@ export function AgentTerminal({
       // Track output volume since last Enter
       dataSinceEnterRef.current += data.length;
 
-      if (
-        agentCommand === 'codex' &&
-        !cliSessionId &&
-        codexStartTimeRef.current !== null &&
-        dataSinceEnterRef.current > 100
-      ) {
-        startCodexSessionDetection();
-      }
-
       // === Output state tracking for UI indicator ===
       // Only track when we're monitoring (after user pressed Enter)
       if (isMonitoringOutputRef.current) {
@@ -784,9 +789,7 @@ export function AgentTerminal({
       initialized,
       onInitialized,
       agentCommand,
-      cliSessionId,
       cwd,
-      startCodexSessionDetection,
       agentNotificationEnabled,
       agentNotificationDelay,
       claudeCodeIntegration.stopHookEnabled,
@@ -846,6 +849,9 @@ export function AgentTerminal({
             const line = getCurrentLine();
             if (line) onActivatedWithFirstLine(line);
           }
+        }
+        if (agentCommand === 'codex' && !cliSessionIdRef.current) {
+          startCodexSessionDetection();
         }
         // Reset output counter.
         dataSinceEnterRef.current = 0;
@@ -933,6 +939,7 @@ export function AgentTerminal({
       setActivityState,
       agentId,
       agentCommand,
+      startCodexSessionDetection,
       claudeCodeIntegration.enhancedInputEnabled,
       enhancedInputOpen,
       setEnhancedInputOpen,
@@ -955,11 +962,18 @@ export function AgentTerminal({
   }, [environment, hapiGlobalInstalled, isActive, resolvedShell, hasPendingCommand]);
 
   useEffect(() => {
-    if (agentCommand !== 'codex' || !effectiveIsActive || codexStartTimeRef.current !== null) {
+    if (agentCommand !== 'codex' || !effectiveIsActive) return;
+    if (codexStartTimeRef.current === null) codexStartTimeRef.current = Date.now();
+    if (
+      !initialPrompt ||
+      cliSessionIdRef.current ||
+      codexInitialPromptDetectionStartedRef.current
+    ) {
       return;
     }
-    codexStartTimeRef.current = Date.now();
-  }, [agentCommand, effectiveIsActive]);
+    codexInitialPromptDetectionStartedRef.current = true;
+    startCodexSessionDetection();
+  }, [agentCommand, effectiveIsActive, initialPrompt, startCodexSessionDetection]);
 
   const {
     containerRef,
@@ -1029,12 +1043,24 @@ export function AgentTerminal({
 
   // Register write and focus functions to global store for external access
   const { register, unregister } = useTerminalWriteStore();
+  const writeFromExternal = useCallback(
+    (data: string) => {
+      if (!write) return;
+
+      write(data);
+      // 外部组件写入回车代表真正提交，此时才开始识别新 Codex 会话。
+      if (data.includes('\r')) {
+        startCodexSessionDetection();
+      }
+    },
+    [write, startCodexSessionDetection]
+  );
   useEffect(() => {
     if (!terminalSessionId || !write) return;
 
-    register(terminalSessionId, write, () => terminal?.focus());
+    register(terminalSessionId, writeFromExternal, () => terminal?.focus());
     return () => unregister(terminalSessionId);
-  }, [terminalSessionId, write, terminal, register, unregister]);
+  }, [terminalSessionId, write, writeFromExternal, terminal, register, unregister]);
 
   // Handle Cmd+F / Ctrl+F
   const handleKeyDown = useCallback(
@@ -1188,11 +1214,15 @@ export function AgentTerminal({
       }
 
       const delay = imagePaths.length > 0 ? 800 : hasInternalNewlines ? 300 : 30;
-      setTimeout(() => write('\r'), delay);
+      setTimeout(() => {
+        write('\r');
+        // 增强输入绕过键盘回调，需在真正发送回车时启动识别。
+        startCodexSessionDetection();
+      }, delay);
 
       terminal?.focus();
     },
-    [write, terminalSessionId, terminal]
+    [write, terminalSessionId, terminal, startCodexSessionDetection]
   );
 
   useEffect(() => {

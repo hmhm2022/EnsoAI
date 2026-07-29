@@ -23,6 +23,7 @@ export interface CodexLatestSessionQuery {
   excludeSessionIds?: string[];
   originator?: string;
   matchMode?: 'strict' | 'legacy-unique';
+  refreshOnMiss?: boolean;
   runtime?: CodexRuntime;
   wslDistro?: string;
 }

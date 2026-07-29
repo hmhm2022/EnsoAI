@@ -479,6 +479,7 @@ export async function findLatestCodexSession({
   excludeSessionIds = [],
   originator,
   matchMode = 'strict',
+  refreshOnMiss = false,
   runtime,
   wslDistro,
   sessionsRoot,
@@ -497,7 +498,7 @@ export async function findLatestCodexSession({
       ? findLatestCodexSessionFromMetadata(
           await wslScanCache.list(location.sessionsRoot, {
             newerThanMs: startedAfter,
-            ...(requireUnique ? { forceRefresh: true } : {}),
+            ...(requireUnique || refreshOnMiss ? { forceRefresh: true } : {}),
           }),
           location.cwd,
           startedAfter,
@@ -530,7 +531,7 @@ export async function findLatestCodexSession({
     if (latest) return addWslDistro(latest, location);
 
     const initialScanCompleted = await indexStore.getState('initial_scan_completed');
-    if (initialScanCompleted !== 'true') {
+    if (initialScanCompleted !== 'true' || refreshOnMiss) {
       await indexer.runRecentScan({
         maxFiles: RECENT_SCAN_MAX_FILES,
         cwd: location.cwd,
@@ -546,23 +547,23 @@ export async function findLatestCodexSession({
       });
       if (latest) return addWslDistro(latest, location);
     }
+    return null;
   } catch (error) {
     console.warn('[CodexHistoryService] 索引查询失败，使用文件扫描：', error);
     indexFailed = true;
+    return addWslDistro(
+      await findLatestCodexSessionByScan(
+        location.sessionsRoot,
+        location.cwd,
+        startedAfter,
+        excludeSessionIds,
+        queryOriginator,
+        sessionSource,
+        requireUnique
+      ),
+      location
+    );
   }
-
-  return addWslDistro(
-    await findLatestCodexSessionByScan(
-      location.sessionsRoot,
-      location.cwd,
-      startedAfter,
-      excludeSessionIds,
-      queryOriginator,
-      sessionSource,
-      requireUnique
-    ),
-    location
-  );
 }
 
 export async function getCodexHistory({
