@@ -22,7 +22,7 @@ export function useTerminal() {
         ...options,
         shellConfig: options?.shell ? undefined : shellConfig,
       };
-      const id = await window.electronAPI.terminal.create(createOptions);
+      const { id } = await window.electronAPI.terminal.create(createOptions);
       addSession({
         id,
         title: 'Terminal',

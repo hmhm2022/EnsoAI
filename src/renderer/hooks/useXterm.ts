@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { defaultDarkTheme, getXtermTheme } from '@/lib/ghosttyTheme';
 import { matchesKeybinding } from '@/lib/keybinding';
 import { stripTerminalColorQueryResponses } from '@/lib/terminalInputFilter';
+import { buildWindowsPtyCompatibilityOptions } from '@/lib/windowsPtyCompatibility';
 import { useNavigationStore } from '@/stores/navigation';
 import { useSettingsStore } from '@/stores/settings';
 import '@xterm/xterm/css/xterm.css';
@@ -596,7 +597,11 @@ export function useXterm({
 
     try {
       const createRequestId = ++createRequestIdRef.current;
-      const ptyId = await window.electronAPI.terminal.create({
+      const {
+        id: ptyId,
+        windowsPtyBackend,
+        windowsConptySource,
+      } = await window.electronAPI.terminal.create({
         cwd: cwd || window.electronAPI.env.HOME,
         // If command is provided (e.g., for agent), use shell/args directly
         // Otherwise, use shellConfig from settings
@@ -611,6 +616,16 @@ export function useXterm({
       if (isUnmountedRef.current || createRequestId !== createRequestIdRef.current) {
         await window.electronAPI.terminal.destroy(ptyId).catch(() => {});
         return;
+      }
+
+      const windowsPtyOptions = buildWindowsPtyCompatibilityOptions({
+        platform: window.electronAPI.env.platform,
+        osRelease: window.electronAPI.env.osRelease,
+        backend: windowsPtyBackend,
+        conptySource: windowsConptySource,
+      });
+      if (windowsPtyOptions.windowsPty) {
+        terminal.options.windowsPty = windowsPtyOptions.windowsPty;
       }
 
       ptyIdRef.current = ptyId;

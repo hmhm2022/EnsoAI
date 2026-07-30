@@ -12,4 +12,17 @@ describe('useXterm terminal display options', () => {
   it('passes Windows ConPTY compatibility setting to terminal creation', () => {
     expect(source).toContain('windowsConptyCompatibilityFixEnabled');
   });
+
+  it('passes native Windows PTY compatibility options to xterm', () => {
+    expect(source).toContain('buildWindowsPtyCompatibilityOptions({');
+    expect(source).toContain('osRelease: window.electronAPI.env.osRelease');
+    expect(source).toContain('backend: windowsPtyBackend');
+    expect(source).toContain('conptySource: windowsConptySource');
+    expect(source).toContain('terminal.options.windowsPty = windowsPtyOptions.windowsPty');
+
+    const optionsIndex = source.indexOf('terminal.options.windowsPty =');
+    const activateIndex = source.indexOf('window.electronAPI.terminal.activate(ptyId)');
+    expect(optionsIndex).toBeGreaterThan(-1);
+    expect(optionsIndex).toBeLessThan(activateIndex);
+  });
 });
