@@ -49,6 +49,7 @@ import type {
   TempWorkspaceCreateResult,
   TempWorkspaceRemoveResult,
   TerminalCreateOptions,
+  TerminalCreateResult,
   TerminalResizeOptions,
   ValidateLocalPathResult,
   ValidateUrlResult,
@@ -410,7 +411,7 @@ const electronAPI = {
 
   // Terminal
   terminal: {
-    create: (options?: TerminalCreateOptions): Promise<string> =>
+    create: (options?: TerminalCreateOptions): Promise<TerminalCreateResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_CREATE, options),
     activate: (id: string): Promise<void> => ipcRenderer.invoke(IPC_CHANNELS.TERMINAL_ACTIVATE, id),
     write: (id: string, data: string): Promise<void> =>

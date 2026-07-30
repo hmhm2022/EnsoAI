@@ -1,6 +1,7 @@
 import type { ChildProcess } from 'node:child_process';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import type { WindowsConptySource, WindowsPtyBackend } from '@shared/types';
 import {
   formatPtyHelperError,
   isPtyHelperEvent,
@@ -10,6 +11,7 @@ import {
 
 export const WINDOWS_PTY_CREATE_TIMEOUT_MS = 10_000;
 export const WINDOWS_PTY_DESTROY_TIMEOUT_MS = 3_000;
+const NODE_PTY_MIN_CONPTY_BUILD = 18309;
 
 export interface WindowsPtyHelperRequest {
   shell: string;
@@ -46,8 +48,23 @@ export interface WindowsPtyHelperDependencies {
 
 export interface WindowsPtyHelperFallbackInput {
   request: WindowsPtyHelperRequest;
+  backend: WindowsPtyBackend;
   useBundledConpty: boolean;
   createAttempt(request: WindowsPtyHelperRequest): Promise<WindowsPtyHelperSession>;
+}
+
+export interface WindowsPtyHelperCreationResult {
+  session: WindowsPtyHelperSession;
+  backend: WindowsPtyBackend;
+  conptySource?: WindowsConptySource;
+}
+
+export function resolveWindowsPtyBackend(osRelease: string): WindowsPtyBackend {
+  const buildNumber = Number.parseInt(osRelease.split('.')[2] ?? '', 10);
+  // 与 node-pty 的默认选择保持一致；无法确认支持 ConPTY 时使用 WinPTY。
+  return Number.isFinite(buildNumber) && buildNumber >= NODE_PTY_MIN_CONPTY_BUILD
+    ? 'conpty'
+    : 'winpty';
 }
 
 export function resolvePtyHelperPath(): string {
@@ -282,20 +299,46 @@ export function startWindowsPtyHelper(
 
 export async function createWindowsPtyWithFallback(
   input: WindowsPtyHelperFallbackInput
-): Promise<WindowsPtyHelperSession> {
-  try {
-    return await input.createAttempt({
+): Promise<WindowsPtyHelperCreationResult> {
+  if (input.backend === 'winpty') {
+    const session = await input.createAttempt({
       ...input.request,
-      options: { ...input.request.options, useConptyDll: input.useBundledConpty },
+      options: {
+        ...input.request.options,
+        useConpty: false,
+        useConptyDll: false,
+      },
     });
+    return { session, backend: 'winpty' };
+  }
+
+  try {
+    const session = await input.createAttempt({
+      ...input.request,
+      options: {
+        ...input.request.options,
+        useConpty: true,
+        useConptyDll: input.useBundledConpty,
+      },
+    });
+    return {
+      session,
+      backend: 'conpty',
+      conptySource: input.useBundledConpty ? 'bundled' : 'system',
+    };
   } catch (bundledError) {
     if (!input.useBundledConpty) throw bundledError;
 
     try {
-      return await input.createAttempt({
+      const session = await input.createAttempt({
         ...input.request,
-        options: { ...input.request.options, useConptyDll: false },
+        options: {
+          ...input.request.options,
+          useConpty: true,
+          useConptyDll: false,
+        },
       });
+      return { session, backend: 'conpty', conptySource: 'system' };
     } catch (systemError) {
       throw new Error(
         `PTY creation failed with bundled and system ConPTY: ${formatPtyHelperError(bundledError)}; ${formatPtyHelperError(systemError)}`

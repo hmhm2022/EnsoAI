@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PtyHelperEvent, PtyHelperSpawnOptions } from '../ptyHelperProtocol';
 import {
   createWindowsPtyWithFallback,
+  resolveWindowsPtyBackend,
   startWindowsPtyHelper,
   type WindowsPtyHelperCallbacks,
   type WindowsPtyHelperRequest,
@@ -78,6 +79,16 @@ function createFakeSession(
 describe('WindowsPtyHelper', () => {
   beforeEach(() => {
     vi.useRealTimers();
+  });
+
+  it.each([
+    ['10.0.17763', 'winpty'],
+    ['10.0.18308', 'winpty'],
+    ['10.0.18309', 'conpty'],
+    ['10.0.19045', 'conpty'],
+    ['bad-release', 'winpty'],
+  ] as const)('resolves Windows release %s to %s', (osRelease, expected) => {
+    expect(resolveWindowsPtyBackend(osRelease)).toBe(expected);
   });
 
   it('resolves ready with helperPid and ptyPid after created', async () => {
@@ -191,6 +202,7 @@ describe('WindowsPtyHelper', () => {
     const session = createFakeSession();
     const result = await createWindowsPtyWithFallback({
       request: createRequest(),
+      backend: 'conpty',
       useBundledConpty: true,
       createAttempt: async (request) => {
         useConptyValues.push(request.options.useConptyDll === true);
@@ -199,7 +211,52 @@ describe('WindowsPtyHelper', () => {
       },
     });
 
-    expect(result).toBe(session);
+    expect(result).toEqual({ session, backend: 'conpty', conptySource: 'system' });
     expect(useConptyValues).toEqual([true, false]);
+  });
+
+  it('reports bundled ConPTY when the first attempt succeeds', async () => {
+    const session = createFakeSession();
+    const result = await createWindowsPtyWithFallback({
+      request: createRequest(),
+      backend: 'conpty',
+      useBundledConpty: true,
+      createAttempt: async () => session,
+    });
+
+    expect(result).toEqual({ session, backend: 'conpty', conptySource: 'bundled' });
+  });
+
+  it('reports system ConPTY when bundled ConPTY is not requested', async () => {
+    const session = createFakeSession();
+    const result = await createWindowsPtyWithFallback({
+      request: createRequest(),
+      backend: 'conpty',
+      useBundledConpty: false,
+      createAttempt: async () => session,
+    });
+
+    expect(result).toEqual({ session, backend: 'conpty', conptySource: 'system' });
+  });
+
+  it('creates WinPTY once without a ConPTY DLL source', async () => {
+    const session = createFakeSession();
+    const requests: WindowsPtyHelperRequest[] = [];
+    const result = await createWindowsPtyWithFallback({
+      request: createRequest(),
+      backend: 'winpty',
+      useBundledConpty: true,
+      createAttempt: async (request) => {
+        requests.push(request);
+        return session;
+      },
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.options).toMatchObject({
+      useConpty: false,
+      useConptyDll: false,
+    });
+    expect(result).toEqual({ session, backend: 'winpty' });
   });
 });

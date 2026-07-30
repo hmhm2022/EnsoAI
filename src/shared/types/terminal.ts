@@ -4,6 +4,15 @@ export interface TerminalSession {
   cwd: string;
 }
 
+export type WindowsPtyBackend = 'conpty' | 'winpty';
+export type WindowsConptySource = 'bundled' | 'system';
+
+export interface TerminalCreateResult {
+  id: string;
+  windowsPtyBackend?: WindowsPtyBackend;
+  windowsConptySource?: WindowsConptySource;
+}
+
 export interface TerminalCreateOptions {
   cwd?: string;
   shell?: string;

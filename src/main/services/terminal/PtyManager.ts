@@ -1,8 +1,8 @@
 import { execSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, release } from 'node:os';
 import { delimiter, join } from 'node:path';
-import type { TerminalCreateOptions } from '@shared/types';
+import type { TerminalCreateOptions, TerminalCreateResult } from '@shared/types';
 import type { IPty } from 'node-pty';
 import pidtree from 'pidtree';
 import pidusage from 'pidusage';
@@ -11,6 +11,7 @@ import { getProxyEnvVars } from '../proxy/ProxyConfig';
 import { detectShell, shellDetector } from './ShellDetector';
 import {
   createWindowsPtyWithFallback,
+  resolveWindowsPtyBackend,
   startWindowsPtyHelper,
   type WindowsPtyHelperAttempt,
   type WindowsPtyHelperCallbacks,
@@ -252,6 +253,7 @@ interface PendingLocalSession {
 
 export interface PtyManagerDependencies {
   platform?: NodeJS.Platform;
+  osRelease?: string;
   loadNodePty?: () => Promise<typeof import('node-pty')>;
   startWindowsPtyHelper?: (
     request: WindowsPtyHelperRequest,
@@ -393,6 +395,7 @@ export class PtyManager {
   private pendingLocalSessions = new Map<string, PendingLocalSession>();
   private counter = 0;
   private readonly platform: NodeJS.Platform;
+  private readonly osRelease: string;
   private readonly loadNodePty: () => Promise<typeof import('node-pty')>;
   private readonly startWindowsPtyHelper: (
     request: WindowsPtyHelperRequest,
@@ -413,6 +416,7 @@ export class PtyManager {
 
   constructor(dependencies: PtyManagerDependencies = {}) {
     this.platform = dependencies.platform ?? process.platform;
+    this.osRelease = dependencies.osRelease ?? release();
     this.loadNodePty = dependencies.loadNodePty ?? (() => import('node-pty'));
     this.startWindowsPtyHelper = dependencies.startWindowsPtyHelper ?? startWindowsPtyHelper;
   }
@@ -422,7 +426,7 @@ export class PtyManager {
     onData: TerminalDataHandler,
     onExit?: TerminalExitHandler,
     ownerId: number | null = null
-  ): Promise<string> {
+  ): Promise<TerminalCreateResult> {
     const id = `pty-${++this.counter}`;
     const home = process.env.HOME || process.env.USERPROFILE || homedir();
     const cwd = options.cwd || home;
@@ -588,7 +592,7 @@ export class PtyManager {
       });
       session.exitDisposable = exitDisposable;
 
-      return id;
+      return { id };
     } finally {
       this.pendingLocalSessions.delete(id);
     }
@@ -605,7 +609,7 @@ export class PtyManager {
     onData: TerminalDataHandler,
     onExit: TerminalExitHandler | undefined,
     ownerId: number | null
-  ): Promise<string> {
+  ): Promise<TerminalCreateResult> {
     let currentAttempt: WindowsPtyHelperAttempt | null = null;
     const pending: PendingWindowsSession = {
       ownerId,
@@ -649,7 +653,9 @@ export class PtyManager {
     };
 
     try {
-      const helperSession = await createWindowsPtyWithFallback({
+      const windowsPtyBackend = resolveWindowsPtyBackend(this.osRelease);
+      const { session: helperSession, conptySource } = await createWindowsPtyWithFallback({
+        backend: windowsPtyBackend,
         request,
         useBundledConpty,
         createAttempt: async (attemptRequest) => {
@@ -688,7 +694,11 @@ export class PtyManager {
         this.activityCache.delete(id);
         onExit?.(id, pendingExit.exitCode, pendingExit.signal);
       }
-      return id;
+      return {
+        id,
+        windowsPtyBackend,
+        ...(conptySource ? { windowsConptySource: conptySource } : {}),
+      };
     } catch (error) {
       this.pendingWindowsSessions.delete(id);
       throw error;

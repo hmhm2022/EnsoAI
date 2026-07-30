@@ -56,10 +56,12 @@ function createOptions() {
 }
 
 function createManager(
-  startWindowsPtyHelper: NonNullable<PtyManagerDependencies['startWindowsPtyHelper']>
+  startWindowsPtyHelper: NonNullable<PtyManagerDependencies['startWindowsPtyHelper']>,
+  osRelease = '10.0.19045'
 ): PtyManager {
   return new PtyManager({
     platform: 'win32',
+    osRelease,
     startWindowsPtyHelper,
   });
 }
@@ -84,13 +86,15 @@ describe('PtyManager Windows helper integration', () => {
     await Promise.resolve();
     ready.resolve(session);
 
-    const id = await pending;
-    manager.write(id, 'echo ready\r');
+    const result = await pending;
+    manager.write(result.id, 'echo ready\r');
+    expect(result.windowsPtyBackend).toBe('conpty');
+    expect(result.windowsConptySource).toBe('system');
     expect(session.write).toHaveBeenCalledWith('echo ready\r');
     expect(session.activate).not.toHaveBeenCalled();
 
-    manager.activate(id);
-    manager.activate(id);
+    manager.activate(result.id);
+    manager.activate(result.id);
     expect(session.activate).toHaveBeenCalledTimes(1);
   });
 
@@ -134,12 +138,9 @@ describe('PtyManager Windows helper integration', () => {
         cancel: vi.fn().mockResolvedValue(undefined),
       };
     });
-    const manager = new PtyManager({
-      platform: 'win32',
-      startWindowsPtyHelper: start,
-    });
+    const manager = createManager(start);
 
-    await manager.create(
+    const result = await manager.create(
       { ...createOptions(), windowsConptyCompatibilityFixEnabled: true },
       vi.fn(),
       vi.fn(),
@@ -147,5 +148,52 @@ describe('PtyManager Windows helper integration', () => {
     );
 
     expect(useConptyValues).toEqual([true, false]);
+    expect(result.windowsPtyBackend).toBe('conpty');
+    expect(result.windowsConptySource).toBe('system');
+  });
+
+  it('reports bundled ConPTY when the bundled helper succeeds', async () => {
+    const session = createFakeSession(9030, 9031);
+    const manager = createManager(
+      (): WindowsPtyHelperAttempt => ({
+        helperPid: session.helperPid,
+        ready: Promise.resolve(session),
+        cancel: vi.fn().mockResolvedValue(undefined),
+      })
+    );
+
+    const result = await manager.create(
+      { ...createOptions(), windowsConptyCompatibilityFixEnabled: true },
+      vi.fn(),
+      vi.fn(),
+      12
+    );
+
+    expect(result.windowsPtyBackend).toBe('conpty');
+    expect(result.windowsConptySource).toBe('bundled');
+  });
+
+  it('reports WinPTY on Windows builds below 18309', async () => {
+    const session = createFakeSession(9040, 9041);
+    const requests: WindowsPtyHelperRequest[] = [];
+    const manager = createManager((request): WindowsPtyHelperAttempt => {
+      requests.push(request);
+      return {
+        helperPid: session.helperPid,
+        ready: Promise.resolve(session),
+        cancel: vi.fn().mockResolvedValue(undefined),
+      };
+    }, '10.0.17763');
+
+    const result = await manager.create(
+      { ...createOptions(), windowsConptyCompatibilityFixEnabled: true },
+      vi.fn(),
+      vi.fn(),
+      13
+    );
+
+    expect(result).toEqual({ id: expect.any(String), windowsPtyBackend: 'winpty' });
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.options).toMatchObject({ useConpty: false, useConptyDll: false });
   });
 });

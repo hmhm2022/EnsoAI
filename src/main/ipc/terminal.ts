@@ -43,7 +43,7 @@ export function registerTerminalHandlers(): void {
       ensureTerminalCleanup(event.sender);
       const ownerId = event.sender.id;
 
-      const id = await ptyManager.create(
+      const result = await ptyManager.create(
         options,
         (ptyId, data) => {
           if (!event.sender.isDestroyed()) {
@@ -62,7 +62,7 @@ export function registerTerminalHandlers(): void {
         ownerId
       );
 
-      return id;
+      return result;
     }
   );
 
