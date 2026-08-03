@@ -17,6 +17,7 @@ import { useFileTree } from '@/hooks/useFileTree';
 import { useFileChanges } from '@/hooks/useSourceControl';
 import { useI18n } from '@/i18n';
 import { isFocusLocked, pauseFocusLock, restoreFocus } from '@/lib/focusLock';
+import { useSettingsStore } from '@/stores/settings';
 import { useTerminalWriteStore } from '@/stores/terminalWrite';
 import { getEditorSelectionText } from './EditorArea';
 import {
@@ -97,11 +98,16 @@ export function FileSidebar({
   const newItemPausedSessionIdRef = useRef<string | null>(null);
 
   // Auto-sync file tree selection with active tab
+  const fileTreeAutoReveal = useSettingsStore((s) => s.fileTreeAutoReveal);
+
   useEffect(() => {
     if (!activeTab?.path || !rootPath) return;
     setSelectedFilePath(activeTab.path);
-    revealFile(activeTab.path);
-  }, [activeTab?.path, rootPath, revealFile]);
+    // Expand parent directories to reveal the file (only if enabled)
+    if (fileTreeAutoReveal) {
+      revealFile(activeTab.path);
+    }
+  }, [activeTab?.path, rootPath, revealFile, fileTreeAutoReveal]);
 
   const handleRecordOperations = useCallback((addFn: (operations: any[]) => void) => {
     addOperationsRef.current = addFn;
